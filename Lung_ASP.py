@@ -459,6 +459,11 @@ def main():
                         help="Skip TotalSegmentator")
     parser.add_argument("--dpi", type=int, default=DEFAULT_DPI,
                         help=f"QC image DPI (default: {DEFAULT_DPI})")
+    parser.add_argument("--totalseg-timeout", type=int,
+                        default=TOTALSEGMENTATOR_TIMEOUT,
+                        help=f"TotalSegmentator timeout in seconds "
+                             f"(default: {TOTALSEGMENTATOR_TIMEOUT}; "
+                             "increase for large volumes or slow systems)")
     args = parser.parse_args()
 
     result = segment_lung_tumor(
