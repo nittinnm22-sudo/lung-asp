@@ -1,0 +1,18 @@
+# Lung-ASP — Python dependencies
+# Install with:  pip install -r requirements.txt
+
+# Core numerical / image processing
+numpy>=1.24
+scipy>=1.10
+nibabel>=5.0          # NIfTI file I/O
+matplotlib>=3.7
+scikit-image>=0.21    # marching cubes, random walker
+
+# DICOM support (only needed for DICOM-mode in the GUI)
+pydicom>=2.4
+dicom2nifti>=2.4
+
+# Anatomical segmentation (optional but recommended)
+# Requires a separate model download; see:
+#   https://github.com/wasserth/TotalSegmentator
+totalsegmentator>=2.0
