@@ -8,9 +8,9 @@ Lung ASP is an automated pipeline for primary lung tumor segmentation and radiom
 
 - **TotalSegmentator integration** — automatic organ/structure segmentation for exclusion masks
 - **Random Walker segmentation** — probabilistic tumor delineation on PET
-- **Exclusion masks** — removes non-tumour uptake (heart, liver, bladder, etc.)
-- **Tumor protection zone** — prevents erosion of true tumour voxels
-- **Hilar zone handling** — separates hilar lymph node uptake from primary tumour
+- **Exclusion masks** — removes non-tumor uptake (heart, liver, bladder, etc.)
+- **Tumor protection zone** — prevents erosion of true tumor voxels
+- **Hilar zone handling** — separates hilar lymph node uptake from primary tumor
 - **Node separation** — disconnects adjacent nodal structures
 - **6-strategy primary tumor isolation** — robust selection of the dominant lesion
 - **Full radiomics metrics** — SUVmax, SUVmean, SUVpeak, MTV, TLG, Dmax, NHOPmax, NHOCmax, Sphericity, Asphericity, gETU
@@ -59,10 +59,10 @@ The GUI lets you browse for PET/CT files and output directory, configure optiona
 
 | File | Description |
 |------|-------------|
-| `tumor_mask.nii.gz` | Binary mask of the primary lung tumour |
+| `tumor_mask.nii.gz` | Binary mask of the primary lung tumor |
 | `constraint_mask.nii.gz` | Combined exclusion/constraint mask |
-| `Mask_QC.png` | PET/CT overlay with tumour contour |
-| `Dmax_QC.png` | Maximum diameter visualisation |
+| `Mask_QC.png` | PET/CT overlay with tumor contour |
+| `Dmax_QC.png` | Maximum diameter visualization |
 | `NHOPmax_QC.png` | Nearest hot-object-to-primary-max distance overlay |
 | `NHOCmax_QC.png` | Nearest hot-object-to-centroid-max distance overlay |
 | `gETU_QC.png` | Gross Extended Tumour Uptake overlay |
@@ -73,17 +73,17 @@ The GUI lets you browse for PET/CT files and output directory, configure optiona
 
 | Metric | Description |
 |--------|-------------|
-| SUVmax | Maximum standardised uptake value in the tumour |
-| SUVmean | Mean SUV across the tumour volume |
-| SUVpeak | Peak SUV (1 cm³ sphere centred on hottest voxel) |
-| MTV | Metabolic tumour volume (mL) |
+| SUVmax | Maximum standardized uptake value in the tumor |
+| SUVmean | Mean SUV across the tumor volume |
+| SUVpeak | Peak SUV (1 cm³ sphere centered on hottest voxel) |
+| MTV | Metabolic tumor volume (mL) |
 | TLG | Total lesion glycolysis (MTV × SUVmean) |
-| Dmax | Maximum 3-D diameter of the tumour (mm) |
-| NHOPmax | Nearest-hot-object distance from the tumour periphery (mm) |
-| NHOCmax | Nearest-hot-object distance from the tumour centroid (mm) |
-| Sphericity | Shape descriptor: ratio of sphere surface area to tumour surface area |
+| Dmax | Maximum 3-D diameter of the tumor (mm) |
+| NHOPmax | Nearest-hot-object distance from the tumor periphery (mm) |
+| NHOCmax | Nearest-hot-object distance from the tumor centroid (mm) |
+| Sphericity | Shape descriptor: ratio of sphere surface area to tumor surface area |
 | Asphericity | 1 − Sphericity |
-| gETU | Gross Extended Tumour Uptake — total PET-positive volume including satellites |
+| gETU | Gross Extended Tumor Uptake — total PET-positive volume including satellites |
 
 ---
 
@@ -94,7 +94,7 @@ The GUI lets you browse for PET/CT files and output directory, configure optiona
 3. **PET thresholding** — candidate voxels selected above an adaptive SUV threshold
 4. **Exclusion mask application** — non-tumour uptake regions are suppressed
 5. **Random Walker** — probabilistic label propagation refines the tumour boundary
-6. **Tumour protection zone** — anchors the segmentation around the hottest voxel
+6. **Tumor protection zone** — anchors the segmentation around the hottest voxel
 7. **Hilar exclusion** — hilar zone uptake is separated from the primary mass
 8. **Node separation** — connected-component analysis isolates individual lesions
 9. **6-strategy primary isolation** — largest/hottest/closest-to-centre candidate selected
