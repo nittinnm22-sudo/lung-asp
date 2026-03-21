@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 VERSION = "6.5"
 DEFAULT_DPI = 150
+TOTALSEGMENTATOR_TIMEOUT = 600  # seconds; increase for large volumes or slow systems
 
 
 def _load_nifti(path):
@@ -68,7 +69,7 @@ def _run_totalsegmentator(ct_nifti_path, output_dir):
         "--ml"
     ]
     logger.info(f"Running TotalSegmentator: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=TOTALSEGMENTATOR_TIMEOUT)
     if result.returncode != 0:
         logger.warning(f"TotalSegmentator failed: {result.stderr[:500]}")
         return None
@@ -169,8 +170,8 @@ def _apply_tumor_protection_zone(mask, pet_data, spacing, protection_mm=5.0):
     expanded = protected & (pet_data > 0)
     # Fill holes in the expanded region
     expanded = ndimage.binary_fill_holes(expanded)
-    # Reconnect to original
-    result = expanded & ~(~mask & ~protected)
+    # Reconnect to original: keep expanded voxels that are within the protected zone or original mask
+    result = expanded & (mask | protected)
     # Ensure original mask is fully included
     result = result | mask
     return result.astype(bool)
@@ -194,9 +195,11 @@ def _separate_nodes(mask, primary_mask, spacing, min_node_gap_mm=10.0):
         if len(prim_coords) == 0:
             nodes.append(comp)
             continue
-        min_dist = np.min(
-            np.sqrt(np.sum(((comp_coords[:, None] - prim_coords[None, :]) * spacing) ** 2, axis=-1))
-        )
+        from scipy.spatial import cKDTree
+        prim_tree = cKDTree(prim_coords * np.array(spacing))
+        comp_phys = comp_coords * np.array(spacing)
+        min_dist, _ = prim_tree.query(comp_phys, k=1, workers=1)
+        min_dist = float(min_dist.min())
         if min_dist > min_node_gap_mm:
             nodes.append(comp)
         else:
