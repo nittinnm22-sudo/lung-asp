@@ -5704,7 +5704,7 @@ Results:
         # depth (cm) to obtain areal density in mg/cm².
         bmd_vol = np.where(bone, np.maximum(0.0, self.cal_slope_eff * sub + self.cal_intercept_eff), 0.0)
         _sx, _sy, _sz = self.ct_spacing if self.ct_spacing else (1.0, 1.0, 1.0)
-        voxel_depth_cm = float(_sy) / 10.0          # AP pixel spacing in cm
+        voxel_depth_cm = float(_sy) / 10.0          # _sy is AP spacing in mm; /10 → cm
         proj_areal = bmd_vol.sum(axis=1) * voxel_depth_cm   # mg/cm²
 
         # Keep a mean-HU projection for display overlay text (diagnostics)
@@ -5844,7 +5844,7 @@ Results:
                 z_sd = max(1e-6, float(getattr(self, "proj_spine_age_sd", 100.0)))
             t = (abmd - ya_mu) / ya_sd
             z = (abmd - z_mu) / z_sd
-            return {"site": tag, "mean_hu": mean_areal, "bmd": abmd, "t_score": t, "z_score": z}
+            return {"site": tag, "mean_areal": mean_areal, "mean_hu": mean_areal, "bmd": abmd, "t_score": t, "z_score": z}
         except Exception:
             return None
 
@@ -6559,7 +6559,8 @@ class DXAProjectionDialog(QDialog):
         z = (abmd - z_mu) / z_sd
         return {
             "site": site_tag or "ROI",
-            "mean_hu": mean_areal,    # kept for backward compat; now mg/cm²
+            "mean_areal": mean_areal,  # mean areal density in mg/cm²
+            "mean_hu": mean_areal,     # backward compat alias (now mg/cm², not HU)
             "bmd": abmd,
             "t_score": t,
             "z_score": z,
