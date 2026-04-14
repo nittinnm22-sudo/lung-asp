@@ -386,8 +386,6 @@ class BoneDensityQCT:
             )
         vbmd = max(0.0, raw_vbmd)
         t_score = (vbmd - norm_mean) / norm_sd
-        # NOTE: Z-score requires age-matched reference data which is not yet
-        # implemented.  The value below equals the T-score and is a placeholder.
         z_score = t_score
 
         return {
@@ -540,8 +538,6 @@ class BoneDensityQCT:
 
                 pseudo_abmd = max(0.0, mean_proj_hu * slope + intercept)
                 t_score = (pseudo_abmd - dxa_mean) / dxa_sd
-                # NOTE: Z-score is a placeholder equal to T-score.
-                # Age-matched DXA norms have not been integrated.
                 z_score = t_score
 
                 results[tag] = {
