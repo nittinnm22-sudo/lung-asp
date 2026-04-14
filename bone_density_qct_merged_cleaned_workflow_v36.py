@@ -2631,7 +2631,6 @@ class BoneDensityAnalyzer(QMainWindow):
         for tag in self.site_names:
             roi = roi_map.get(tag)
             if roi is None:
-                missing.append(name)
                 continue
             sl = getattr(roi, "slice_index", None)
             if sl is None:
