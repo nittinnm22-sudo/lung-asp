@@ -333,9 +333,13 @@ class BoneDensityQCT:
 
         Returns
         -------
-        dict with keys: tag, mean_hu, std_hu, voxel_count,
-                         vbmd, t_score, z_score (z_score requires age norms,
-                         here set equal to t_score as a placeholder)
+        dict with keys: tag, mean_hu, std_hu, voxel_count, vbmd, t_score,
+        z_score, z_score_note.
+
+        .. warning::
+            ``z_score`` is a *placeholder* equal to ``t_score``.
+            Proper age-matched Z-scores require population reference data
+            that has not yet been integrated.
         """
         _, roi = self._find_roi_by_tag(tag)
         if roi is None:
@@ -374,9 +378,17 @@ class BoneDensityQCT:
             norm_mean = self.qct_fn_norm_mean
             norm_sd = self.qct_fn_norm_sd
 
-        vbmd = max(0.0, mean_hu * slope + intercept)
+        raw_vbmd = mean_hu * slope + intercept
+        if raw_vbmd < 0.0:
+            logger.warning(
+                "ROI '%s': raw vBMD=%.1f mg/cm³ is negative (possible calibration/data issue); clamping to 0.",
+                tag, raw_vbmd,
+            )
+        vbmd = max(0.0, raw_vbmd)
         t_score = (vbmd - norm_mean) / norm_sd
-        z_score = t_score  # age-matched norms not implemented; equals t-score
+        # NOTE: Z-score requires age-matched reference data which is not yet
+        # implemented.  The value below equals the T-score and is a placeholder.
+        z_score = t_score
 
         return {
             "tag": tag,
@@ -386,6 +398,7 @@ class BoneDensityQCT:
             "vbmd": vbmd,
             "t_score": t_score,
             "z_score": z_score,
+            "z_score_note": "placeholder – equals T-score (age-matched norms not implemented)",
         }
 
     def _compute_axial_results(self) -> dict:
@@ -456,6 +469,11 @@ class BoneDensityQCT:
         Returns
         -------
         dict: tag -> result dict
+
+        .. warning::
+            ``z_score`` is a *placeholder* equal to ``t_score``.
+            Proper age-matched Z-scores require population reference data
+            that has not yet been integrated.
         """
         if self.ct_volume is None:
             raise RuntimeError("CT volume not loaded")
@@ -522,7 +540,9 @@ class BoneDensityQCT:
 
                 pseudo_abmd = max(0.0, mean_proj_hu * slope + intercept)
                 t_score = (pseudo_abmd - dxa_mean) / dxa_sd
-                z_score = t_score  # age-matched norms not implemented
+                # NOTE: Z-score is a placeholder equal to T-score.
+                # Age-matched DXA norms have not been integrated.
+                z_score = t_score
 
                 results[tag] = {
                     "tag": tag,
@@ -530,6 +550,7 @@ class BoneDensityQCT:
                     "pseudo_abmd": pseudo_abmd,
                     "t_score": t_score,
                     "z_score": z_score,
+                    "z_score_note": "placeholder – equals T-score (age-matched norms not implemented)",
                     "sampled_voxels": int(nonzero.size),
                 }
 

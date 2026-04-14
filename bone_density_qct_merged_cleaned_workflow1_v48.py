@@ -113,15 +113,24 @@ class _ROIDialog:
         self._tag.grid(row=0, column=1, **pad)
         self._tag.insert(0, "L1")
 
-        for i, (lbl, default) in enumerate(
-            [("Center X (vox):", "20"), ("Center Y (vox):", "30"), ("Center Z (vox):", "10")],
+        for i, (lbl, default, attr) in enumerate(
+            [
+                ("Center X (vox):", "20", "_cx"),
+                ("Center Y (vox):", "30", "_cy"),
+                ("Center Z (vox):", "10", "_cz"),
+            ],
             start=1,
         ):
             ttk.Label(self._top, text=lbl).grid(row=i, column=0, sticky="e", **pad)
             entry = ttk.Entry(self._top, width=10)
             entry.insert(0, default)
             entry.grid(row=i, column=1, **pad)
-            setattr(self, f"_c{['x','y','z'][i-1]}", entry)
+            if attr == "_cx":
+                self._cx = entry
+            elif attr == "_cy":
+                self._cy = entry
+            else:
+                self._cz = entry
 
         ttk.Label(self._top, text="Radius (mm):").grid(
             row=4, column=0, sticky="e", **pad
@@ -164,7 +173,7 @@ class BoneDensityApp:
     # Window title
     TITLE = "Bone Density QCT v48"
 
-    def __init__(self, root: "tk.Tk"):
+    def __init__(self, root: "tk.Tk"):  # noqa: F821 – tk available when this runs
         self.root = root
         self.root.title(self.TITLE)
         self.root.geometry("1100x760")
