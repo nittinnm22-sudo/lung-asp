@@ -5802,23 +5802,24 @@ Results:
     def _build_dxa_projection_payload(self):
         if self.ct_data is None:
             return None, None
-        display_proj, display_meta = self._build_dxa_display_payload()
-        quant_proj, quant_meta = self._build_dxa_quant_payload()
-        if display_proj is None:
+        # Use the same full-body z-range for both display and quantification
+        # so that canvas ROI coordinates map identically to both images.
+        # Previously the quant projection used a target-range-only z-range
+        # which was smaller than the full-body display, causing ROI
+        # coordinates placed on the display to fall outside the quant image
+        # and measure from the wrong anatomical region.
+        proj, meta = self._make_ap_projection(0, int(self.ct_data.shape[2] - 1))
+        if proj is None:
             return None, None
-        meta = dict(display_meta or {})
-        meta["display_proj"] = display_proj
-        if quant_proj is not None:
-            meta["quant_proj"] = quant_proj
-            meta["quant_meta"] = quant_meta or {}
-        return display_proj, meta
+        return proj, meta
 
     def _collect_projected_dxa_preview_rois(self, meta: dict) -> List[dict]:
         out = []
         if self.ct_data is None:
             return out
-        quant_meta = (meta or {}).get("quant_meta", {}) or {}
-        z_max = int(quant_meta.get("z_max", (meta or {}).get("z_max", self.ct_data.shape[2] - 1)))
+        # Always use the top-level z_max (which now matches both display
+        # and quant images after the coordinate-alignment fix).
+        z_max = int((meta or {}).get("z_max", self.ct_data.shape[2] - 1))
         px_x, px_y, px_z = self.ct_spacing if self.ct_spacing is not None else (1.0, 1.0, 1.0)
         for tag in ("L1", "L2", "L3", "L4", "FN_L", "FN_R"):
             spec = self._get_target_spec(tag)
