@@ -1278,16 +1278,26 @@ class BoneDensityAnalyzer(QMainWindow):
         self.proj_fn_age_mean = 740.0
         self.proj_fn_age_sd = 100.0
         # Projection calibration: converts raw CT projection aBMD to
-        # DXA-equivalent aBMD.  The power-law depth model (ap_depth_power)
-        # compresses depth dependence, so the raw projection values are
-        # systematically lower than DXA.  Slopes > 1.0 compensate.
-        # Spine and FN need different slopes because the depth power-law
-        # already accounts for much of the cortex-vs-trabecular difference
-        # that previously required a very low FN slope.
-        self.proj_spine_slope = 1.00
+        # DXA-equivalent aBMD.  With cortical cap at 300 and upward depth
+        # clamping, raw projection values are lower than DXA scale.
+        # Slopes > 1.0 scale them back to the DXA reference range.
+        # Spine slope is tuned so that normal L1-L4 aBMD ≈ 1000 mg/cm².
+        # FN slope is used as fallback when qCT vBMD is unavailable.
+        self.proj_spine_slope = 1.70
         self.proj_spine_intercept = 0.0
-        self.proj_fn_slope = 1.20
+        self.proj_fn_slope = 1.75
         self.proj_fn_intercept = 0.0
+        # FN pseudo-DXA from qCT vBMD: when axial qCT results exist
+        # for a femoral neck site, derive aBMD directly from the
+        # volumetric BMD using a published-style linear conversion
+        # rather than the AP projection.  This eliminates cortical-
+        # shell and depth artifacts that plague the projection for FN.
+        #   aBMD (mg/cm²) = fn_vbmd_to_abmd_slope × vBMD + fn_vbmd_to_abmd_intercept
+        # Default values calibrated so that:
+        #   vBMD ~ 130 mg/cm³ (young adult) → aBMD ~ 860 mg/cm²
+        #   vBMD ~  65 mg/cm³ (osteoporotic) → aBMD ~ 690 mg/cm²
+        self.fn_vbmd_to_abmd_slope = 2.60
+        self.fn_vbmd_to_abmd_intercept = 522.0
         self.ap_bone_only_zero_clip = True
         self.ap_auto_hu_min = True
         self.ap_show_thickness_overlay = True
@@ -1299,15 +1309,25 @@ class BoneDensityAnalyzer(QMainWindow):
         # For each AP ray the code computes:
         #   mean_vbmd   = integral / bone_count          (mg/cm³)
         #   actual_depth = bone_count × voxel_depth       (cm)
-        #   eff_depth    = ref_depth × (actual/ref)^power (cm)
+        #   ratio        = actual_depth / ref_depth
+        #   ratio_clamp  = min(ratio, 1.0)               (upward clamp)
+        #   eff_depth    = ref_depth × ratio_clamp^power  (cm)
         #   proj_pixel   = mean_vbmd × eff_depth          (mg/cm²)
         #
+        # The upward clamp (ratio capped at 1.0) means bones thicker
+        # than ref_depth get NO additional effective depth.  This
+        # eliminates depth-driven L4 > L1 inversions: all lumbar
+        # vertebrae (whose AP bone depth exceeds 3.0 cm) produce
+        # aBMD proportional to mean vBMD only, so ranking tracks qCT.
+        #
+        # Bones thinner than ref (e.g. osteoporotic FN with only a
+        # thin cortical shell) still get reduced eff_depth, preserving
+        # sensitivity to bone loss via the depth channel.
+        #
         # power = 0  → pure mean × fixed depth (no depth sensitivity)
-        # power = 1  → pure integral (full depth sensitivity, poor scale)
-        # power = 0.6 → moderate: captures DXA-like depth dependence
-        #               (osteoporotic thin FN → low aBMD) while
-        #               compressing thick-bone inflation (L4 posterior).
-        self.ap_ref_bone_depth_cm = 4.0
+        # power = 1  → full depth sensitivity
+        # power = 0.6 → moderate (used for projection fallback only)
+        self.ap_ref_bone_depth_cm = 3.0
         self.ap_depth_power = 0.6
         self.site_names: List[str] = ["L1", "L2", "L3", "L4", "FN_L", "FN_R"]
         self.vertebral: Dict[str, Optional[dict]] = {v: None for v in self.site_names}
@@ -5729,49 +5749,43 @@ Results:
         # integrate along the AP direction (axis=1) multiplied by voxel
         # depth (cm) to obtain areal density in mg/cm².
         bmd_vol = np.where(bone, np.maximum(0.0, self.cal_slope_eff * sub + self.cal_intercept_eff), 0.0)
-        # Cap per-voxel BMD contribution to 1000 mg/cm³.  Dense cortical bone
-        # (HU > 800) converts to vBMD far above this cap; without it the
-        # areal integral for cortex-rich regions (especially femoral neck)
-        # overshoots realistic DXA aBMD.
-        bmd_vol = np.minimum(bmd_vol, 1000.0)
+        # Cap per-voxel BMD contribution to 300 mg/cm³.  This suppresses
+        # the cortical dominance problem: dense cortical bone (HU > 400)
+        # converts to vBMD 300–700+ mg/cm³, which inflates the per-ray
+        # mean when only cortex remains (osteoporotic bone).  Capping at
+        # 300 compresses cortex-to-trabecular ratio from ~5× to ~2×,
+        # letting the depth component (not the mean) drive discrimination.
+        bmd_vol = np.minimum(bmd_vol, 300.0)
         _sx, _sy, _sz = self.ct_spacing if self.ct_spacing else (1.0, 1.0, 1.0)
         voxel_depth_cm = float(_sy) / 10.0          # _sy is AP spacing in mm; /10 → cm
 
-        # ---------- Power-law depth areal projection ----------
-        # Pure mean-vBMD × fixed depth (previous approach) gives correct
-        # absolute scale but loses ALL depth sensitivity.  The HU
-        # threshold excludes low-density trabecular bone from osteoporotic
-        # regions, leaving only cortex.  Since cortical vBMD is high
-        # regardless of trabecular health, the mean is nearly constant
-        # across healthy and osteoporotic bone → no discrimination.
+        # ---------- Clamped power-law depth areal projection ----------
+        # Compute mean vBMD per ray, then scale by an effective depth
+        # that uses a power-law of actual depth clamped at the reference.
         #
-        # Pure integral (Σ vBMD × Δy) gives good relative discrimination
-        # but absolute values are too low for small bones (FN) and too
-        # high for thick vertebrae with posterior elements (L4).
-        #
-        # Compromise: compute mean vBMD per ray (density component),
-        # then scale by an effective depth that follows a power-law of
-        # the actual bone depth:
-        #
-        #   eff_depth = ref_depth × (actual_depth / ref_depth)^power
-        #
-        # With power = 0.6:
-        #   • Thin bones (osteoporotic FN, actual < ref): eff_depth drops
-        #     substantially → aBMD tracks real bone loss.
-        #   • Thick bones (L4 posterior elements, actual ~ ref): eff_depth
-        #     is compressed → limits L4 inflation.
-        #   • Overall scale anchored to ref_depth → plausible mg/cm² range.
+        # The upward clamp (ratio ≤ 1.0) is critical:
+        #   • Vertebrae (L1-L4) are all ≥ 3 cm AP bone depth, so all
+        #     get clamped to eff_depth = ref_depth.  Their aBMD is purely
+        #     proportional to mean_vbmd → ranking tracks axial qCT.
+        #   • Femoral necks (1-2.5 cm bone depth) are below ref, so
+        #     they get reduced eff_depth via the power-law, preserving
+        #     depth-based discrimination of bone loss.
+        #   • The cortical cap (300 mg/cm³ above) limits mean_vbmd
+        #     inflation from cortex-only regions, so the depth component
+        #     dominates the healthy-vs-osteoporotic FN difference.
         bone_count_per_ray = bone.sum(axis=1).astype(np.float32)
         bone_count_safe = np.maximum(bone_count_per_ray, 1.0)
         mean_vbmd_per_ray = bmd_vol.sum(axis=1) / bone_count_safe   # mg/cm³
         mean_vbmd_per_ray[bone_count_per_ray == 0] = 0.0
 
-        ref_depth_cm = float(getattr(self, "ap_ref_bone_depth_cm", 4.0))
+        ref_depth_cm = float(getattr(self, "ap_ref_bone_depth_cm", 3.0))
         depth_power = float(getattr(self, "ap_depth_power", 0.6))
 
         actual_depth_per_ray = bone_count_per_ray * voxel_depth_cm   # cm
         ratio = actual_depth_per_ray / max(ref_depth_cm, 1e-6)
-        ratio_safe = np.maximum(ratio, 1e-6)
+        # Clamp upward: bones thicker than ref get no extra depth.
+        ratio_clamped = np.minimum(ratio, 1.0)
+        ratio_safe = np.maximum(ratio_clamped, 1e-6)
         eff_depth = ref_depth_cm * np.power(ratio_safe, depth_power)
         eff_depth[bone_count_per_ray == 0] = 0.0
 
@@ -5886,7 +5900,13 @@ Results:
         return out
 
     def _measure_projected_dxa_preview_roi(self, proj: np.ndarray, roi_info: dict) -> Optional[dict]:
-        """Measure a single projected ROI on the quant image (mg/cm²)."""
+        """Measure a single projected ROI on the quant image (mg/cm²).
+
+        For femoral neck sites (FN_L, FN_R), if axial qCT results are
+        available, derive aBMD from the volumetric BMD via a linear
+        conversion rather than the AP projection.  This eliminates
+        cortical-shell and depth artifacts that plague the projection.
+        """
         try:
             rows, cols = np.ogrid[:proj.shape[0], :proj.shape[1]]
             x = float(roi_info["x"])
@@ -5902,13 +5922,23 @@ Results:
             mean_areal = float(np.mean(bone_vals))
             tag = str(roi_info.get("tag", "ROI"))
             a, b = self._proj_calibration_for_site(tag)
-            abmd = max(0.0, a * mean_areal + b)
+
+            # --- FN: prefer qCT-derived aBMD when available ---
             if tag in ("FN_L", "FN_R"):
+                qct_res = self.vertebral.get(tag)
+                if qct_res and isinstance(qct_res, dict) and "bmd" in qct_res:
+                    vbmd = float(qct_res["bmd"])
+                    fn_m = float(getattr(self, "fn_vbmd_to_abmd_slope", 2.60))
+                    fn_c = float(getattr(self, "fn_vbmd_to_abmd_intercept", 522.0))
+                    abmd = max(0.0, fn_m * vbmd + fn_c)
+                else:
+                    abmd = max(0.0, a * mean_areal + b)
                 ya_mu = float(getattr(self, "proj_fn_young_mean", 860.0))
                 ya_sd = max(1e-6, float(getattr(self, "proj_fn_young_sd", 110.0)))
                 z_mu = float(getattr(self, "proj_fn_age_mean", 740.0))
                 z_sd = max(1e-6, float(getattr(self, "proj_fn_age_sd", 100.0)))
             else:
+                abmd = max(0.0, a * mean_areal + b)
                 ya_mu = float(getattr(self, "proj_spine_young_mean", 1000.0))
                 ya_sd = max(1e-6, float(getattr(self, "proj_spine_young_sd", 120.0)))
                 z_mu = float(getattr(self, "proj_spine_age_mean", 850.0))
@@ -6608,7 +6638,10 @@ class DXAProjectionDialog(QDialog):
         return ya_mu, ya_sd, z_mu, z_sd
 
     def _measure_one_roi(self, roi: SphericalROI) -> Optional[dict]:
-        """Measure one projected ROI on the quant image (now in mg/cm²)."""
+        """Measure one projected ROI on the quant image (now in mg/cm²).
+
+        For FN sites, uses qCT vBMD-derived aBMD when available.
+        """
         rows, cols = np.ogrid[:self.proj.shape[0], :self.proj.shape[1]]
         mask = ((cols - roi.center.x()) ** 2 + (rows - roi.center.y()) ** 2) <= (roi.radius ** 2)
         vals = self.proj[mask]
@@ -6624,7 +6657,20 @@ class DXAProjectionDialog(QDialog):
         mean_areal = float(np.mean(bone_vals))
         site_tag = str(getattr(roi, "tag", ""))
         a, b = self.main._proj_calibration_for_site(site_tag)
-        abmd = max(0.0, a * mean_areal + b)
+
+        # --- FN: prefer qCT-derived aBMD when available ---
+        if site_tag in ("FN_L", "FN_R"):
+            qct_res = self.main.vertebral.get(site_tag)
+            if qct_res and isinstance(qct_res, dict) and "bmd" in qct_res:
+                vbmd = float(qct_res["bmd"])
+                fn_m = float(getattr(self.main, "fn_vbmd_to_abmd_slope", 2.60))
+                fn_c = float(getattr(self.main, "fn_vbmd_to_abmd_intercept", 522.0))
+                abmd = max(0.0, fn_m * vbmd + fn_c)
+            else:
+                abmd = max(0.0, a * mean_areal + b)
+        else:
+            abmd = max(0.0, a * mean_areal + b)
+
         ya_mu, ya_sd, z_mu, z_sd = self._norms_for_site(site_tag)
         t = (abmd - ya_mu) / ya_sd
         z = (abmd - z_mu) / z_sd
