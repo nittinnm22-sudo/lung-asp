@@ -2616,7 +2616,7 @@ class BoneDensityAnalyzer(QMainWindow):
 
     def _build_dxa_results_table(self) -> QTableWidget:
         cols = [
-            "Region", "Type", "Mean HU", "Pseudo-aBMD", "T-score", "Z-score",
+            "Region", "Type", "aBMD (mg/cm²)", "Calibrated aBMD", "T-score", "Z-score",
             "Bone Voxels", "All Voxels",
         ]
         dxa = self.dxa_proj_last or {}
@@ -4009,7 +4009,12 @@ class BoneDensityAnalyzer(QMainWindow):
         mask_status_parts = ["segmask" if mask_site2d is not None else "roi_only"]
 
         if self.mask_enable:
-            within = (ct_slice >= self.mask_hu_min) & (ct_slice <= self.mask_hu_max)
+            # FN sites need a tighter HU ceiling to exclude dense cortical bone
+            # (trabecular bone is typically <250 HU; cortical bone is 300-1000+ HU)
+            effective_hu_max = float(self.mask_hu_max)
+            if str(site).startswith("FN"):
+                effective_hu_max = min(effective_hu_max, 250.0)
+            within = (ct_slice >= self.mask_hu_min) & (ct_slice <= effective_hu_max)
             cand = mask & within
             if cand.sum() >= max(10, int(0.05 * max(mask.sum(), 1))):
                 mask = cand
@@ -4024,17 +4029,22 @@ class BoneDensityAnalyzer(QMainWindow):
                 mask_status_parts.append(f"erode{int(self.mask_erode_px)}")
 
         if is_bone_site and getattr(self, "auto_cortex", False) and binary_erosion is not None:
+            # FN ROIs are inherently smaller and have thicker cortex —
+            # use a lower cortex threshold and accept fewer surviving voxels.
+            is_fn = str(site).startswith("FN")
+            effective_cortex_thr = min(float(self.cortex_hu_thr), 250.0) if is_fn else float(self.cortex_hu_thr)
+            min_survive = 20 if is_fn else 50
             base = mask.copy()
             best = base
             for it in range(int(self.cortex_min_px), int(self.cortex_max_px) + 1):
                 cand = binary_erosion(base, iterations=it)
-                if cand.sum() < 50:
+                if cand.sum() < min_survive:
                     break
-                hi_frac = float((ct_slice[cand] >= float(self.cortex_hu_thr)).sum()) / float(cand.sum())
+                hi_frac = float((ct_slice[cand] >= effective_cortex_thr).sum()) / float(cand.sum())
                 best = cand
                 if hi_frac <= float(self.qc_cortex_hi_frac_thr):
                     break
-            if best.sum() >= 50 and best.sum() < mask.sum():
+            if best.sum() >= min_survive and best.sum() < mask.sum():
                 mask = best
                 mask_status_parts.append("cortex_auto")
 
@@ -5703,6 +5713,13 @@ Results:
         # integrate along the AP direction (axis=1) multiplied by voxel
         # depth (cm) to obtain areal density in mg/cm².
         bmd_vol = np.where(bone, np.maximum(0.0, self.cal_slope_eff * sub + self.cal_intercept_eff), 0.0)
+        # Cap per-voxel BMD contribution to 600 mg/cm³.  Dense cortical bone
+        # (HU > 600) converts to vBMD far above this cap; without it the
+        # areal integral for cortex-rich regions (especially femoral neck)
+        # overshoots realistic DXA aBMD by 50-100 %.  The cap approximates
+        # beam-hardening saturation in physical DXA systems, which reduces
+        # sensitivity at very high mineral densities.
+        bmd_vol = np.minimum(bmd_vol, 600.0)
         _sx, _sy, _sz = self.ct_spacing if self.ct_spacing else (1.0, 1.0, 1.0)
         voxel_depth_cm = float(_sy) / 10.0          # _sy is AP spacing in mm; /10 → cm
         proj_areal = bmd_vol.sum(axis=1) * voxel_depth_cm   # mg/cm²
