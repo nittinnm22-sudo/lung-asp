@@ -5713,43 +5713,41 @@ Results:
         # integrate along the AP direction (axis=1) multiplied by voxel
         # depth (cm) to obtain areal density in mg/cm².
         bmd_vol = np.where(bone, np.maximum(0.0, self.cal_slope_eff * sub + self.cal_intercept_eff), 0.0)
-        # Cap per-voxel BMD contribution to 800 mg/cm³.  Dense cortical bone
-        # and posterior elements (HU > 600) convert to vBMD far above this;
-        # without the cap, cortex-rich rays (especially femoral neck and
-        # posterior spine) dominate the projection.  Combined with the
-        # thickness normalisation below, this cap reduces posterior-element
-        # contamination while the normalisation removes AP-depth bias.
-        # FN overshoot is further managed by the per-site proj_fn_slope
-        # calibration factor (0.60).
-        bmd_vol = np.minimum(bmd_vol, 800.0)
+        # Cap per-voxel BMD contribution to 1000 mg/cm³.  Dense cortical bone
+        # (HU > 800) converts to vBMD far above this cap; without it the
+        # areal integral for cortex-rich regions (especially femoral neck)
+        # overshoots realistic DXA aBMD.  FN overshoot is further managed
+        # by the per-site proj_fn_slope calibration factor (0.60).
+        bmd_vol = np.minimum(bmd_vol, 1000.0)
         _sx, _sy, _sz = self.ct_spacing if self.ct_spacing else (1.0, 1.0, 1.0)
         voxel_depth_cm = float(_sy) / 10.0          # _sy is AP spacing in mm; /10 → cm
 
-        # ---------- Thickness-normalised areal projection ----------
-        # The raw integral (Σ vBMD × Δy) along each AP ray gives true
-        # areal BMD (mg/cm²), but it is dominated by AP bone depth: a
-        # vertebra with large posterior elements or thicker body (e.g. L4)
-        # collects more voxels and therefore more mg/cm², even when its
-        # trabecular vBMD is *lower* than a thinner vertebra.
+        # ---------- Partial thickness correction ----------
+        # The raw integral (Σ vBMD × Δy) along each AP ray gives areal
+        # BMD (mg/cm²) like real DXA, but the CT projection is far more
+        # sensitive to AP bone depth than physical DXA (no beam-hardening
+        # attenuation, every cortical voxel fully resolved).  A vertebra
+        # with thick posterior elements (e.g. L4) collects more bone
+        # voxels per ray and therefore gets an inflated aBMD even when
+        # its trabecular vBMD is lower than a thinner vertebra.
         #
-        # Real DXA has the same physics (PA projection includes posterior
-        # elements), but the CT integral is far more sensitive because
-        # every cortical voxel is resolved individually.
+        # A power-law correction dampens this depth dependence without
+        # destroying the DXA-like integral physics:
+        #   corrected = raw_integral / (bone_count / ref_count)^exponent
         #
-        # Fix: divide each ray's sum by its bone-voxel count, yielding
-        # mean vBMD along the ray (mg/cm³).  Then multiply by a global
-        # reference bone depth (the median across the projection) so the
-        # output stays in a comparable mg/cm² range.  This makes the
-        # per-pixel value proportional to *density* rather than *mass*,
-        # and the vertebral ranking will track axial qCT.
+        # exponent = 0.0 → pure integral (original, L4 overestimated)
+        # exponent = 1.0 → fully normalised (mean BMD, wrong scale)
+        # exponent = 0.4 → partial: reduces L4 inflation ~11 % while
+        #                   keeping the overall mg/cm² scale intact.
+        THICKNESS_EXP = 0.4
+        raw_integral = bmd_vol.sum(axis=1)
         bone_count_per_ray = bone.sum(axis=1).astype(np.float32)
         bone_count_safe = np.maximum(bone_count_per_ray, 1.0)
-        mean_vbmd_per_ray = bmd_vol.sum(axis=1) / bone_count_safe     # mg/cm³
-        mean_vbmd_per_ray[bone_count_per_ray == 0] = 0.0
-
         nonzero_counts = bone_count_per_ray[bone_count_per_ray > 0]
-        ref_depth_voxels = float(np.median(nonzero_counts)) if nonzero_counts.size > 0 else 1.0
-        proj_areal = mean_vbmd_per_ray * ref_depth_voxels * voxel_depth_cm  # mg/cm²
+        ref_depth = float(np.median(nonzero_counts)) if nonzero_counts.size > 0 else 1.0
+        correction = np.power(bone_count_safe / ref_depth, THICKNESS_EXP)
+        correction[bone_count_per_ray == 0] = 1.0
+        proj_areal = (raw_integral / correction) * voxel_depth_cm  # mg/cm²
 
         # Keep a mean-HU projection for display overlay text (diagnostics)
         masked_hu = np.where(bone, sub, 0.0)
