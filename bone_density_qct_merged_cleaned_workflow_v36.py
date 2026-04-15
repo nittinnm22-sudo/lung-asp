@@ -1277,12 +1277,15 @@ class BoneDensityAnalyzer(QMainWindow):
         self.proj_fn_young_sd = 110.0
         self.proj_fn_age_mean = 740.0
         self.proj_fn_age_sd = 100.0
-        # Projection calibration: since quant image is already in mg/cm²,
-        # default slope=1.0, intercept=0.0 (identity).  Users may adjust
-        # these via the phantomless dialog if scanner-specific correction is needed.
-        self.proj_spine_slope = 1.00
+        # Projection calibration: converts raw CT integral-projection aBMD to
+        # DXA-equivalent aBMD.  CT integral projection systematically overestimates
+        # aBMD compared to real DXA (no beam-hardening correction, higher spatial
+        # resolution capturing more cortical detail).  The overestimation is
+        # particularly severe for femoral neck due to thick cortical shell.
+        # Literature-based default slopes: spine ~0.90, FN ~0.60.
+        self.proj_spine_slope = 0.90
         self.proj_spine_intercept = 0.0
-        self.proj_fn_slope = 1.00
+        self.proj_fn_slope = 0.60
         self.proj_fn_intercept = 0.0
         self.ap_bone_only_zero_clip = True
         self.ap_auto_hu_min = True
@@ -2616,7 +2619,7 @@ class BoneDensityAnalyzer(QMainWindow):
 
     def _build_dxa_results_table(self) -> QTableWidget:
         cols = [
-            "Region", "Type", "aBMD (mg/cm²)", "Calibrated aBMD", "T-score", "Z-score",
+            "Region", "Type", "Raw Proj (mg/cm²)", "aBMD (mg/cm²)", "T-score", "Z-score",
             "Bone Voxels", "All Voxels",
         ]
         dxa = self.dxa_proj_last or {}
@@ -2627,7 +2630,7 @@ class BoneDensityAnalyzer(QMainWindow):
                 [
                     str(res.get("site", "")),
                     "Per-ROI",
-                    self._fmt_result_value(res.get("mean_hu"), 1),
+                    self._fmt_result_value(res.get("mean_areal", res.get("mean_hu")), 1),
                     self._fmt_result_value(res.get("bmd"), 1),
                     self._fmt_result_value(res.get("t_score"), 2),
                     self._fmt_result_value(res.get("z_score"), 2),
@@ -2643,7 +2646,7 @@ class BoneDensityAnalyzer(QMainWindow):
                 [
                     "L1-L4 Composite",
                     "Composite",
-                    self._fmt_result_value(res.get("mean_hu"), 1),
+                    "",
                     self._fmt_result_value(res.get("bmd"), 1),
                     self._fmt_result_value(res.get("t_score"), 2),
                     self._fmt_result_value(res.get("z_score"), 2),
@@ -2657,7 +2660,7 @@ class BoneDensityAnalyzer(QMainWindow):
                 [
                     "Femoral Neck Mean",
                     "Composite",
-                    self._fmt_result_value(res.get("mean_hu"), 1),
+                    "",
                     self._fmt_result_value(res.get("bmd"), 1),
                     self._fmt_result_value(res.get("t_score"), 2),
                     self._fmt_result_value(res.get("z_score"), 2),
@@ -6542,15 +6545,15 @@ class DXAProjectionDialog(QDialog):
 
     def _norms_for_site(self, tag: str):
         if tag in self.HIP_TAGS:
-            ya_mu = float(getattr(self.main, "proj_fn_young_mean", 235.0))
-            ya_sd = max(1e-6, float(getattr(self.main, "proj_fn_young_sd", 40.0)))
-            z_mu = float(getattr(self.main, "proj_fn_age_mean", 205.0))
-            z_sd = max(1e-6, float(getattr(self.main, "proj_fn_age_sd", 35.0)))
+            ya_mu = float(getattr(self.main, "proj_fn_young_mean", 860.0))
+            ya_sd = max(1e-6, float(getattr(self.main, "proj_fn_young_sd", 110.0)))
+            z_mu = float(getattr(self.main, "proj_fn_age_mean", 740.0))
+            z_sd = max(1e-6, float(getattr(self.main, "proj_fn_age_sd", 100.0)))
         else:
-            ya_mu = float(getattr(self.main, "proj_spine_young_mean", 210.0))
-            ya_sd = max(1e-6, float(getattr(self.main, "proj_spine_young_sd", 35.0)))
-            z_mu = float(getattr(self.main, "proj_spine_age_mean", 180.0))
-            z_sd = max(1e-6, float(getattr(self.main, "proj_spine_age_sd", 30.0)))
+            ya_mu = float(getattr(self.main, "proj_spine_young_mean", 1000.0))
+            ya_sd = max(1e-6, float(getattr(self.main, "proj_spine_young_sd", 120.0)))
+            z_mu = float(getattr(self.main, "proj_spine_age_mean", 850.0))
+            z_sd = max(1e-6, float(getattr(self.main, "proj_spine_age_sd", 100.0)))
         return ya_mu, ya_sd, z_mu, z_sd
 
     def _measure_one_roi(self, roi: SphericalROI) -> Optional[dict]:
