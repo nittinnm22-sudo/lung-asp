@@ -1293,6 +1293,15 @@ class BoneDensityAnalyzer(QMainWindow):
         self.ap_hu_min = 50.0
         self.ap_hu_max = 2000.0
         self.ap_lock_to_vertebral_body = True
+        # Reference bone depth (cm) used to convert per-ray mean vBMD
+        # (mg/cm³) into pseudo-areal density (mg/cm²).  Dividing each
+        # ray's integral by its bone-voxel count removes the AP-depth
+        # bias (L4 posterior elements no longer inflate aBMD), and
+        # multiplying by this fixed depth restores the DXA-like mg/cm²
+        # scale.  Typical vertebral body AP bone depth is 3–5 cm;
+        # 4.5 cm gives aBMD values close to standard DXA reference
+        # norms (~1 000 mg/cm² for young-adult spine).
+        self.ap_ref_bone_depth_cm = 4.5
         self.site_names: List[str] = ["L1", "L2", "L3", "L4", "FN_L", "FN_R"]
         self.vertebral: Dict[str, Optional[dict]] = {v: None for v in self.site_names}
         self.vertebra_masks: Dict[str, Optional[np.ndarray]] = {
@@ -5722,32 +5731,32 @@ Results:
         _sx, _sy, _sz = self.ct_spacing if self.ct_spacing else (1.0, 1.0, 1.0)
         voxel_depth_cm = float(_sy) / 10.0          # _sy is AP spacing in mm; /10 → cm
 
-        # ---------- Partial thickness correction ----------
-        # The raw integral (Σ vBMD × Δy) along each AP ray gives areal
-        # BMD (mg/cm²) like real DXA, but the CT projection is far more
-        # sensitive to AP bone depth than physical DXA (no beam-hardening
-        # attenuation, every cortical voxel fully resolved).  A vertebra
-        # with thick posterior elements (e.g. L4) collects more bone
-        # voxels per ray and therefore gets an inflated aBMD even when
-        # its trabecular vBMD is lower than a thinner vertebra.
+        # ---------- Density-based areal projection ----------
+        # The raw AP integral (Σ vBMD × Δy) is proportional to total
+        # bone mass along each ray.  A vertebra with large posterior
+        # elements (e.g. L4) accumulates more bone voxels per ray and
+        # therefore more mg/cm², even when its trabecular vBMD is
+        # *lower* than a thinner vertebra.  This makes the raw
+        # integral ranking diverge from axial qCT density ranking.
         #
-        # A power-law correction dampens this depth dependence without
-        # destroying the DXA-like integral physics:
-        #   corrected = raw_integral / (bone_count / ref_count)^exponent
+        # Fix: divide each ray's integral by its bone-voxel count to
+        # obtain the mean vBMD (mg/cm³) along the ray, which reflects
+        # *density* rather than *mass*.  Then multiply by a fixed
+        # reference bone depth (ap_ref_bone_depth_cm, default 4.5 cm)
+        # to convert back to a DXA-like mg/cm² scale.
         #
-        # exponent = 0.0 → pure integral (original, L4 overestimated)
-        # exponent = 1.0 → fully normalised (mean BMD, wrong scale)
-        # exponent = 0.4 → partial: reduces L4 inflation ~11 % while
-        #                   keeping the overall mg/cm² scale intact.
-        THICKNESS_EXP = 0.4
-        raw_integral = bmd_vol.sum(axis=1)
+        # Benefits:
+        #   • aBMD ranking tracks axial qCT density (L4 ≤ L1 when L4
+        #     has lower trabecular vBMD).
+        #   • The mg/cm² scale matches standard DXA reference norms
+        #     (~1000 mg/cm² for young-adult L-spine) so that T-/Z-
+        #     scores land in clinically sensible ranges.
         bone_count_per_ray = bone.sum(axis=1).astype(np.float32)
         bone_count_safe = np.maximum(bone_count_per_ray, 1.0)
-        nonzero_counts = bone_count_per_ray[bone_count_per_ray > 0]
-        ref_depth = float(np.median(nonzero_counts)) if nonzero_counts.size > 0 else 1.0
-        correction = np.power(bone_count_safe / ref_depth, THICKNESS_EXP)
-        correction[bone_count_per_ray == 0] = 1.0
-        proj_areal = (raw_integral / correction) * voxel_depth_cm  # mg/cm²
+        mean_vbmd_per_ray = bmd_vol.sum(axis=1) / bone_count_safe   # mg/cm³
+        mean_vbmd_per_ray[bone_count_per_ray == 0] = 0.0
+        ref_depth_cm = float(getattr(self, "ap_ref_bone_depth_cm", 4.5))
+        proj_areal = mean_vbmd_per_ray * ref_depth_cm                # mg/cm²
 
         # Keep a mean-HU projection for display overlay text (diagnostics)
         masked_hu = np.where(bone, sub, 0.0)
