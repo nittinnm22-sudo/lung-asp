@@ -2619,7 +2619,7 @@ class BoneDensityAnalyzer(QMainWindow):
 
     def _build_dxa_results_table(self) -> QTableWidget:
         cols = [
-            "Region", "Type", "Raw Proj (mg/cm²)", "aBMD (mg/cm²)", "T-score", "Z-score",
+            "Region", "Type", "aBMD (mg/cm²)", "T-score", "Z-score",
             "Bone Voxels", "All Voxels",
         ]
         dxa = self.dxa_proj_last or {}
@@ -2630,7 +2630,6 @@ class BoneDensityAnalyzer(QMainWindow):
                 [
                     str(res.get("site", "")),
                     "Per-ROI",
-                    self._fmt_result_value(res.get("mean_areal", res.get("mean_hu")), 1),
                     self._fmt_result_value(res.get("bmd"), 1),
                     self._fmt_result_value(res.get("t_score"), 2),
                     self._fmt_result_value(res.get("z_score"), 2),
@@ -2646,7 +2645,6 @@ class BoneDensityAnalyzer(QMainWindow):
                 [
                     "L1-L4 Composite",
                     "Composite",
-                    "",
                     self._fmt_result_value(res.get("bmd"), 1),
                     self._fmt_result_value(res.get("t_score"), 2),
                     self._fmt_result_value(res.get("z_score"), 2),
@@ -2660,7 +2658,6 @@ class BoneDensityAnalyzer(QMainWindow):
                 [
                     "Femoral Neck Mean",
                     "Composite",
-                    "",
                     self._fmt_result_value(res.get("bmd"), 1),
                     self._fmt_result_value(res.get("t_score"), 2),
                     self._fmt_result_value(res.get("z_score"), 2),
@@ -5716,13 +5713,19 @@ Results:
         # integrate along the AP direction (axis=1) multiplied by voxel
         # depth (cm) to obtain areal density in mg/cm².
         bmd_vol = np.where(bone, np.maximum(0.0, self.cal_slope_eff * sub + self.cal_intercept_eff), 0.0)
-        # Cap per-voxel BMD contribution to 600 mg/cm³.  Dense cortical bone
-        # (HU > 600) converts to vBMD far above this cap; without it the
+        # Cap per-voxel BMD contribution to 1000 mg/cm³.  Dense cortical bone
+        # (HU > 800) converts to vBMD far above this cap; without it the
         # areal integral for cortex-rich regions (especially femoral neck)
-        # overshoots realistic DXA aBMD by 50-100 %.  The cap approximates
+        # overshoots realistic DXA aBMD.  The cap approximates
         # beam-hardening saturation in physical DXA systems, which reduces
         # sensitivity at very high mineral densities.
-        bmd_vol = np.minimum(bmd_vol, 600.0)
+        # Previous 600 cap was too aggressive for spine, causing artificial
+        # rank inversions where higher-HU vertebrae (L1-L3) got lower aBMD
+        # than L4 due to disproportionate cortical capping.  1000 mg/cm³
+        # preserves the saturation effect while keeping vertebral rankings
+        # consistent with axial qCT.  FN overshoot is managed by the
+        # per-site proj_fn_slope calibration factor (0.60).
+        bmd_vol = np.minimum(bmd_vol, 1000.0)
         _sx, _sy, _sz = self.ct_spacing if self.ct_spacing else (1.0, 1.0, 1.0)
         voxel_depth_cm = float(_sy) / 10.0          # _sy is AP spacing in mm; /10 → cm
         proj_areal = bmd_vol.sum(axis=1) * voxel_depth_cm   # mg/cm²
