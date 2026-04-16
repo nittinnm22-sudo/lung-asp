@@ -95,13 +95,16 @@ logging.debug("Module import start.")
 # ================================================================
 # Norms (for T/Z-score computation)
 # ================================================================
+# Spine (L1-L4) trabecular vBMD norms  (K₂HPO₄-equivalent mg/cm³)
 def young_adult_norms(sex: str) -> Tuple[float, float]:
+    """Young-adult spine vBMD norms (kept for backward compatibility)."""
     if (sex or "F").upper().startswith("F"):
         return 160.0, 28.0
     return 170.0, 32.0
 
 
 def age_matched_norms(age: int, sex: str) -> Tuple[float, float]:
+    """Age-matched spine vBMD norms (kept for backward compatibility)."""
     age = int(max(20, min(90, age)))
     if (sex or "F").upper().startswith("F"):
         mean0, sd0, slope = 160.0, 28.0, 0.9
@@ -109,6 +112,56 @@ def age_matched_norms(age: int, sex: str) -> Tuple[float, float]:
         mean0, sd0, slope = 170.0, 32.0, 0.8
     mean = max(80.0, mean0 - slope * max(0, age - 30))
     return float(mean), float(sd0)
+
+
+# Femoral-neck trabecular vBMD norms  (K₂HPO₄-equivalent mg/cm³)
+# Typical FN trabecular vBMD is ~90-120 mg/cm³ in young adults
+# (lower than lumbar spine ~140-175 mg/cm³).
+def young_adult_norms_fn(sex: str) -> Tuple[float, float]:
+    """Young-adult femoral neck vBMD norms."""
+    if (sex or "F").upper().startswith("F"):
+        return 120.0, 20.0
+    return 130.0, 22.0
+
+
+def age_matched_norms_fn(age: int, sex: str) -> Tuple[float, float]:
+    """Age-matched femoral neck vBMD norms."""
+    age = int(max(20, min(90, age)))
+    if (sex or "F").upper().startswith("F"):
+        mean0, sd0, slope = 120.0, 20.0, 0.7
+    else:
+        mean0, sd0, slope = 130.0, 22.0, 0.6
+    mean = max(50.0, mean0 - slope * max(0, age - 30))
+    return float(mean), float(sd0)
+
+
+def young_adult_norms_for_site(site: str, sex: str) -> Tuple[float, float]:
+    """Return site-appropriate young-adult vBMD norms."""
+    if str(site).startswith("FN"):
+        return young_adult_norms_fn(sex)
+    return young_adult_norms(sex)
+
+
+def age_matched_norms_for_site(site: str, age: int, sex: str) -> Tuple[float, float]:
+    """Return site-appropriate age-matched vBMD norms."""
+    if str(site).startswith("FN"):
+        return age_matched_norms_fn(age, sex)
+    return age_matched_norms(age, sex)
+
+
+def acr_vbmd_classification(bmd: float) -> str:
+    """ACR absolute vBMD threshold classification (mg/cm³).
+
+    ACR/ISCD recommended thresholds for trabecular vBMD:
+      >120 mg/cm³  = Normal
+      80-120        = Osteopenia (low bone mass)
+      <80           = Osteoporosis
+    """
+    if bmd > 120.0:
+        return "Normal"
+    if bmd >= 80.0:
+        return "Osteopenia"
+    return "Osteoporosis"
 
 
 # ================================================================
@@ -1212,25 +1265,90 @@ class BoneDensityAnalyzer(QMainWindow):
         self.dxa_fn_young_mean = 860.0
         self.dxa_fn_young_sd = 100.0
         # Projection-specific pseudo-norms used only for AP/areal results.
-        # These are kept separate from CT vBMD norms and scanner DXA norms.
-        self.proj_spine_young_mean = 210.0
-        self.proj_spine_young_sd = 35.0
-        self.proj_spine_age_mean = 180.0
-        self.proj_spine_age_sd = 30.0
-        self.proj_fn_young_mean = 235.0
-        self.proj_fn_young_sd = 40.0
-        self.proj_fn_age_mean = 205.0
-        self.proj_fn_age_sd = 35.0
-        self.proj_spine_slope = 1.00
+        # Now in mg/cm² (true areal density scale) after integral projection.
+        # DXA reference aBMD values:
+        #   Spine (L1-L4): young adult ~1000 mg/cm² ± 120,  ~850 age-matched ± 100
+        #   Femoral neck:  young adult ~ 860 mg/cm² ± 110,  ~740 age-matched ± 100
+        self.proj_spine_young_mean = 1000.0
+        self.proj_spine_young_sd = 120.0
+        self.proj_spine_age_mean = 850.0
+        self.proj_spine_age_sd = 100.0
+        self.proj_fn_young_mean = 860.0
+        self.proj_fn_young_sd = 110.0
+        self.proj_fn_age_mean = 740.0
+        self.proj_fn_age_sd = 100.0
+        # Projection calibration: converts raw CT projection aBMD to
+        # DXA-equivalent aBMD.  With cortical cap at 300 and upward depth
+        # clamping, raw projection values are lower than DXA scale.
+        # Slopes > 1.0 scale them back to the DXA reference range.
+        # Spine slope is tuned so that normal L1-L4 aBMD ≈ 1000 mg/cm².
+        # FN slope is used as fallback when qCT vBMD is unavailable.
+        self.proj_spine_slope = 1.70
         self.proj_spine_intercept = 0.0
-        self.proj_fn_slope = 1.00
+        self.proj_fn_slope = 1.75
         self.proj_fn_intercept = 0.0
+        # FN pseudo-DXA from qCT vBMD: when axial qCT results exist
+        # for a femoral neck site, derive aBMD directly from the
+        # volumetric BMD using a published-style linear conversion
+        # rather than the AP projection.  This eliminates cortical-
+        # shell and depth artifacts that plague the projection for FN.
+        #   aBMD (mg/cm²) = fn_vbmd_to_abmd_slope × vBMD + fn_vbmd_to_abmd_intercept
+        # Default values calibrated so that:
+        #   vBMD ~ 130 mg/cm³ (young adult) → aBMD ~ 860 mg/cm²
+        #   vBMD ~  65 mg/cm³ (osteoporotic) → aBMD ~ 690 mg/cm²
+        self.fn_vbmd_to_abmd_slope = 2.60
+        self.fn_vbmd_to_abmd_intercept = 522.0
+        # Spine pseudo-DXA from qCT vBMD: same principle as FN above.
+        # When axial qCT results exist for a spine site, derive aBMD
+        # directly from vBMD rather than the noisy AP projection.
+        # The AP projection produces large aBMD discrepancies between
+        # vertebrae with similar vBMD (e.g. L1 vs L2) due to differences
+        # in vertebral body size, posterior element overlap, and soft-
+        # tissue path length.  The linear conversion maps qCT vBMD to
+        # the DXA aBMD scale, preserving T-score equivalence.
+        #   aBMD (mg/cm²) = spine_vbmd_to_abmd_slope × vBMD + spine_vbmd_to_abmd_intercept
+        # Calibrated from female qCT/DXA norms:
+        #   qCT young-adult spine vBMD  = 160 mg/cm³, SD = 28
+        #   DXA young-adult spine aBMD  = 1000 mg/cm², SD = 120
+        #   slope = DXA_SD / qCT_SD ≈ 4.30
+        #   intercept = DXA_mean − slope × qCT_mean ≈ 312
+        # Example mappings (female):
+        #   vBMD ~ 160 mg/cm³ (young adult)  → aBMD ~ 1000 mg/cm²  (T ≈ 0)
+        #   vBMD ~ 120 mg/cm³ (osteopenic)   → aBMD ~  828 mg/cm²  (T ≈ −1.4)
+        #   vBMD ~  80 mg/cm³ (osteoporotic)  → aBMD ~  656 mg/cm²  (T ≈ −2.9)
+        self.spine_vbmd_to_abmd_slope = 4.30
+        self.spine_vbmd_to_abmd_intercept = 312.0
         self.ap_bone_only_zero_clip = True
         self.ap_auto_hu_min = True
         self.ap_show_thickness_overlay = True
         self.ap_hu_min = 50.0
         self.ap_hu_max = 2000.0
         self.ap_lock_to_vertebral_body = True
+        # Reference bone depth (cm) and depth power exponent.
+        #
+        # For each AP ray the code computes:
+        #   mean_vbmd   = integral / bone_count          (mg/cm³)
+        #   actual_depth = bone_count × voxel_depth       (cm)
+        #   ratio        = actual_depth / ref_depth
+        #   ratio_clamp  = min(ratio, 1.0)               (upward clamp)
+        #   eff_depth    = ref_depth × ratio_clamp^power  (cm)
+        #   proj_pixel   = mean_vbmd × eff_depth          (mg/cm²)
+        #
+        # The upward clamp (ratio capped at 1.0) means bones thicker
+        # than ref_depth get NO additional effective depth.  This
+        # eliminates depth-driven L4 > L1 inversions: all lumbar
+        # vertebrae (whose AP bone depth exceeds 3.0 cm) produce
+        # aBMD proportional to mean vBMD only, so ranking tracks qCT.
+        #
+        # Bones thinner than ref (e.g. osteoporotic FN with only a
+        # thin cortical shell) still get reduced eff_depth, preserving
+        # sensitivity to bone loss via the depth channel.
+        #
+        # power = 0  → pure mean × fixed depth (no depth sensitivity)
+        # power = 1  → full depth sensitivity
+        # power = 0.6 → moderate (used for projection fallback only)
+        self.ap_ref_bone_depth_cm = 3.0
+        self.ap_depth_power = 0.6
         self.site_names: List[str] = ["L1", "L2", "L3", "L4", "FN_L", "FN_R"]
         self.vertebral: Dict[str, Optional[dict]] = {v: None for v in self.site_names}
         self.vertebra_masks: Dict[str, Optional[np.ndarray]] = {
@@ -2557,7 +2675,7 @@ class BoneDensityAnalyzer(QMainWindow):
 
     def _build_dxa_results_table(self) -> QTableWidget:
         cols = [
-            "Region", "Type", "Mean HU", "Pseudo-aBMD", "T-score", "Z-score",
+            "Region", "Type", "aBMD (mg/cm²)", "T-score", "Z-score",
             "Bone Voxels", "All Voxels",
         ]
         dxa = self.dxa_proj_last or {}
@@ -2568,7 +2686,6 @@ class BoneDensityAnalyzer(QMainWindow):
                 [
                     str(res.get("site", "")),
                     "Per-ROI",
-                    self._fmt_result_value(res.get("mean_hu"), 1),
                     self._fmt_result_value(res.get("bmd"), 1),
                     self._fmt_result_value(res.get("t_score"), 2),
                     self._fmt_result_value(res.get("z_score"), 2),
@@ -2584,7 +2701,6 @@ class BoneDensityAnalyzer(QMainWindow):
                 [
                     "L1-L4 Composite",
                     "Composite",
-                    self._fmt_result_value(res.get("mean_hu"), 1),
                     self._fmt_result_value(res.get("bmd"), 1),
                     self._fmt_result_value(res.get("t_score"), 2),
                     self._fmt_result_value(res.get("z_score"), 2),
@@ -2598,7 +2714,6 @@ class BoneDensityAnalyzer(QMainWindow):
                 [
                     "Femoral Neck Mean",
                     "Composite",
-                    self._fmt_result_value(res.get("mean_hu"), 1),
                     self._fmt_result_value(res.get("bmd"), 1),
                     self._fmt_result_value(res.get("t_score"), 2),
                     self._fmt_result_value(res.get("z_score"), 2),
@@ -2631,7 +2746,6 @@ class BoneDensityAnalyzer(QMainWindow):
         for tag in self.site_names:
             roi = roi_map.get(tag)
             if roi is None:
-                missing.append(name)
                 continue
             sl = getattr(roi, "slice_index", None)
             if sl is None:
@@ -2828,6 +2942,12 @@ class BoneDensityAnalyzer(QMainWindow):
     def open_results_window(self):
         ct_rows = [self.vertebral.get(site) for site in self.site_names if self.vertebral.get(site)]
         self._ensure_dxa_projection_results(force=False)
+        # Re-apply spine ranking correction using latest qCT data.
+        # The correction depends on self.vertebral (axial qCT vBMD), which
+        # may not have been populated when the DXA projection was first
+        # computed and cached in dxa_proj_last.  Re-correcting here ensures
+        # the latest qCT results are always reflected.
+        self._recorrect_dxa_proj_last()
         dxa_rows = list((self.dxa_proj_last or {}).get("sites", []) or [])
         has_spine_comp = bool(((self.dxa_proj_last or {}).get("composite", {}) or {}).get("spine"))
         has_hip_comp = bool(((self.dxa_proj_last or {}).get("composite", {}) or {}).get("hips_mean"))
@@ -3951,7 +4071,12 @@ class BoneDensityAnalyzer(QMainWindow):
         mask_status_parts = ["segmask" if mask_site2d is not None else "roi_only"]
 
         if self.mask_enable:
-            within = (ct_slice >= self.mask_hu_min) & (ct_slice <= self.mask_hu_max)
+            # FN sites need a tighter HU ceiling to exclude dense cortical bone
+            # (trabecular bone is typically <250 HU; cortical bone is 300-1000+ HU)
+            effective_hu_max = float(self.mask_hu_max)
+            if str(site).startswith("FN"):
+                effective_hu_max = min(effective_hu_max, 250.0)
+            within = (ct_slice >= self.mask_hu_min) & (ct_slice <= effective_hu_max)
             cand = mask & within
             if cand.sum() >= max(10, int(0.05 * max(mask.sum(), 1))):
                 mask = cand
@@ -3966,17 +4091,22 @@ class BoneDensityAnalyzer(QMainWindow):
                 mask_status_parts.append(f"erode{int(self.mask_erode_px)}")
 
         if is_bone_site and getattr(self, "auto_cortex", False) and binary_erosion is not None:
+            # FN ROIs are inherently smaller and have thicker cortex —
+            # use a lower cortex threshold and accept fewer surviving voxels.
+            is_fn = str(site).startswith("FN")
+            effective_cortex_thr = min(float(self.cortex_hu_thr), 250.0) if is_fn else float(self.cortex_hu_thr)
+            min_survive = 20 if is_fn else 50
             base = mask.copy()
             best = base
             for it in range(int(self.cortex_min_px), int(self.cortex_max_px) + 1):
                 cand = binary_erosion(base, iterations=it)
-                if cand.sum() < 50:
+                if cand.sum() < min_survive:
                     break
-                hi_frac = float((ct_slice[cand] >= float(self.cortex_hu_thr)).sum()) / float(cand.sum())
+                hi_frac = float((ct_slice[cand] >= effective_cortex_thr).sum()) / float(cand.sum())
                 best = cand
                 if hi_frac <= float(self.qc_cortex_hi_frac_thr):
                     break
-            if best.sum() >= 50 and best.sum() < mask.sum():
+            if best.sum() >= min_survive and best.sum() < mask.sum():
                 mask = best
                 mask_status_parts.append("cortex_auto")
 
@@ -3994,12 +4124,15 @@ class BoneDensityAnalyzer(QMainWindow):
             t = float('nan')
             z_score = float('nan')
             who = 'N/A'
+            acr = 'N/A'
         else:
-            ya_mu, ya_sd = young_adult_norms(self.patient_sex)
+            # Use site-aware norms: FN sites get femoral-neck reference values
+            ya_mu, ya_sd = young_adult_norms_for_site(str(site), self.patient_sex)
             t = (bmd - ya_mu) / ya_sd
-            z_mu, z_sd = age_matched_norms(self.patient_age, self.patient_sex)
+            z_mu, z_sd = age_matched_norms_for_site(str(site), self.patient_age, self.patient_sex)
             z_score = (bmd - z_mu) / z_sd
             who = "Normal" if t >= -1.0 else ("Osteopenia" if t >= -2.5 else "Osteoporosis")
+            acr = acr_vbmd_classification(bmd)
 
         qc_reasons: List[str] = []
         metal_frac = float((vals >= float(self.qc_metal_hu_thr)).sum()) / float(vals.size) if vals.size else 0.0
@@ -4020,6 +4153,7 @@ class BoneDensityAnalyzer(QMainWindow):
             "t_score": t,
             "z_score": z_score,
             "who_classification": who,
+            "acr_classification": acr,
             "nvox": int(mask.sum()),
             "mask_status": "|".join(mask_status_parts),
             "qc_status": qc_status,
@@ -4092,10 +4226,12 @@ class BoneDensityAnalyzer(QMainWindow):
 
     def _display_results(self, res, name: str):
         if str(name).startswith("L") or str(name).startswith("FN"):
+            acr = res.get('acr_classification', '')
+            acr_part = f"  ACR={acr}" if acr and acr != 'N/A' else ""
             line = (
-                f"{name}: HU={res['mean_hu']:.1f}  BMD={res['bmd']:.1f}  "
+                f"{name}: HU={res['mean_hu']:.1f}  BMD={res['bmd']:.1f} mg/cm³  "
                 f"T={res['t_score']:.2f}  Z={res.get('z_score', float('nan')):.2f}  "
-                f"Class={res['who_classification']}"
+                f"WHO={res['who_classification']}{acr_part}"
             )
         else:
             line = f"{name}: HU={res['mean_hu']:.1f}  BMD={res['bmd']:.1f}  Class=N/A"
@@ -5249,16 +5385,19 @@ class BoneDensityAnalyzer(QMainWindow):
         t_comp = float(np.mean(ts))
         z_comp = float(np.nanmean(zs))
         who = "Normal" if t_comp >= -1.0 else ("Osteopenia" if t_comp >= -2.5 else "Osteoporosis")
+        acr = acr_vbmd_classification(bmd_comp)
         lines = [
-            "DXA-Style L1–L4 Composite",
-            "-" * 34,
-            f"Composite BMD: {bmd_comp:.1f} mg/cm³",
+            "QCT L1–L4 Composite (K₂HPO₄-eq. vBMD)",
+            "-" * 42,
+            f"Composite vBMD: {bmd_comp:.1f} mg/cm³",
             f"Composite T-score: {t_comp:.2f}",
             f"Composite Z-score: {z_comp:.2f}",
-            f"Classification: {who}",
+            f"WHO (T-score): {who}",
+            f"ACR (vBMD):    {acr}",
         ]
         self.results.append("\n" + "\n".join(lines))
-        return {"bmd": bmd_comp, "t_score": t_comp, "z_score": z_comp, "class": who}
+        return {"bmd": bmd_comp, "t_score": t_comp, "z_score": z_comp,
+                "class": who, "acr_class": acr}
 
     def export_csv(self):
         rows = []
@@ -5274,7 +5413,8 @@ class BoneDensityAnalyzer(QMainWindow):
                         "BMD_mg_cm3": f"{r['bmd']:.1f}",
                         "TScore": f"{r['t_score']:.2f}",
                         "ZScore": f"{r.get('z_score', float('nan')):.2f}",
-                        "Class": r["who_classification"],
+                        "WHO_Class": r["who_classification"],
+                        "ACR_Class": r.get("acr_classification", ""),
                         "Voxels": r.get("nvox", 0),
                         "Mask": r.get("mask_status", ""),
                         "QC_Status": r.get("qc_status", ""),
@@ -5298,7 +5438,8 @@ class BoneDensityAnalyzer(QMainWindow):
                     "BMD_mg_cm3": f"{comp['bmd']:.1f}",
                     "TScore": f"{comp['t_score']:.2f}",
                     "ZScore": f"{comp['z_score']:.2f}",
-                    "Class": comp["class"],
+                    "WHO_Class": comp["class"],
+                    "ACR_Class": comp.get("acr_class", ""),
                     "Voxels": "",
                     "Mask": "",
                     "QC_Status": "",
@@ -5397,6 +5538,7 @@ Results:
                     f"  QC: {res.get('qc_status','')}\n\n"
                 )
         if self.dxa_proj_last:
+            self._recorrect_dxa_proj_last()
             d = self.dxa_proj_last
             if "sites" in d:
                 report += "DXA-style AP projection:\n"
@@ -5488,12 +5630,14 @@ Results:
                 continue
             res = res.copy()
             bmd = max(0.0, self.cal_slope_eff * res["mean_hu"] + self.cal_intercept_eff)
-            ya_mu, ya_sd = young_adult_norms(self.patient_sex)
+            ya_mu, ya_sd = young_adult_norms_for_site(name, self.patient_sex)
             t = (bmd - ya_mu) / ya_sd
-            z_mu, z_sd = age_matched_norms(self.patient_age, self.patient_sex)
+            z_mu, z_sd = age_matched_norms_for_site(name, self.patient_age, self.patient_sex)
             z_score = (bmd - z_mu) / z_sd
             who = "Normal" if t >= -1.0 else ("Osteopenia" if t >= -2.5 else "Osteoporosis")
-            res.update({"bmd": bmd, "t_score": t, "z_score": z_score, "who_classification": who})
+            acr = acr_vbmd_classification(bmd)
+            res.update({"bmd": bmd, "t_score": t, "z_score": z_score,
+                        "who_classification": who, "acr_classification": acr})
             self.vertebral[name] = res
             self._display_results(res, name)
         QMessageBox.information(self, "Calibration", "Recomputed all with current calibration.")
@@ -5605,7 +5749,10 @@ Results:
         Display image:
             full-body coronal-style MIP for publication-friendly visibility.
         Quantification image:
-            bone-only mean projection used for DXA-style pseudo-aBMD calculations.
+            Areal-integral projection of bone BMD along the AP axis.
+            Each pixel = Σ(cal_slope * HU + cal_intercept) × voxel_depth_cm
+            for all bone voxels along the ray, giving mg/cm² (pseudo-aBMD).
+            This matches the DXA concept: BMC (mg) per projected area (cm²).
         """
         if self.ct_data is None:
             return None, None
@@ -5621,13 +5768,61 @@ Results:
         hu_min = float(self.ap_hu_min) if self.ap_bone_only_zero_clip else -300.0
         hu_max = float(self.ap_hu_max)
         if self.ap_auto_hu_min:
-            hu_min = max(hu_min, 100.0)
+            hu_min = max(hu_min, 80.0)
 
         bone = (sub >= hu_min) & (sub <= hu_max)
-        masked = np.where(bone, sub, 0.0)
+
+        # Convert HU to vBMD (mg/cm³) using the current calibration, then
+        # integrate along the AP direction (axis=1) multiplied by voxel
+        # depth (cm) to obtain areal density in mg/cm².
+        bmd_vol = np.where(bone, np.maximum(0.0, self.cal_slope_eff * sub + self.cal_intercept_eff), 0.0)
+        # Cap per-voxel BMD contribution to 300 mg/cm³.  This suppresses
+        # the cortical dominance problem: dense cortical bone (HU > 400)
+        # converts to vBMD 300–700+ mg/cm³, which inflates the per-ray
+        # mean when only cortex remains (osteoporotic bone).  Capping at
+        # 300 compresses cortex-to-trabecular ratio from ~5× to ~2×,
+        # letting the depth component (not the mean) drive discrimination.
+        bmd_vol = np.minimum(bmd_vol, 300.0)
+        _sx, _sy, _sz = self.ct_spacing if self.ct_spacing else (1.0, 1.0, 1.0)
+        voxel_depth_cm = float(_sy) / 10.0          # _sy is AP spacing in mm; /10 → cm
+
+        # ---------- Clamped power-law depth areal projection ----------
+        # Compute mean vBMD per ray, then scale by an effective depth
+        # that uses a power-law of actual depth clamped at the reference.
+        #
+        # The upward clamp (ratio ≤ 1.0) is critical:
+        #   • Vertebrae (L1-L4) are all ≥ 3 cm AP bone depth, so all
+        #     get clamped to eff_depth = ref_depth.  Their aBMD is purely
+        #     proportional to mean_vbmd → ranking tracks axial qCT.
+        #   • Femoral necks (1-2.5 cm bone depth) are below ref, so
+        #     they get reduced eff_depth via the power-law, preserving
+        #     depth-based discrimination of bone loss.
+        #   • The cortical cap (300 mg/cm³ above) limits mean_vbmd
+        #     inflation from cortex-only regions, so the depth component
+        #     dominates the healthy-vs-osteoporotic FN difference.
+        bone_count_per_ray = bone.sum(axis=1).astype(np.float32)
+        bone_count_safe = np.maximum(bone_count_per_ray, 1.0)
+        mean_vbmd_per_ray = bmd_vol.sum(axis=1) / bone_count_safe   # mg/cm³
+        mean_vbmd_per_ray[bone_count_per_ray == 0] = 0.0
+
+        ref_depth_cm = float(getattr(self, "ap_ref_bone_depth_cm", 3.0))
+        depth_power = float(getattr(self, "ap_depth_power", 0.6))
+
+        actual_depth_per_ray = bone_count_per_ray * voxel_depth_cm   # cm
+        ratio = actual_depth_per_ray / max(ref_depth_cm, 1e-6)
+        # Clamp upward: bones thicker than ref get no extra depth.
+        ratio_clamped = np.minimum(ratio, 1.0)
+        ratio_safe = np.maximum(ratio_clamped, 1e-6)
+        eff_depth = ref_depth_cm * np.power(ratio_safe, depth_power)
+        eff_depth[bone_count_per_ray == 0] = 0.0
+
+        proj_areal = mean_vbmd_per_ray * eff_depth                   # mg/cm²
+
+        # Keep a mean-HU projection for display overlay text (diagnostics)
+        masked_hu = np.where(bone, sub, 0.0)
         thickness = bone.sum(axis=1).astype(np.float32)
         thickness_safe = np.maximum(thickness, 1.0)
-        proj_bone_mean = masked.sum(axis=1) / thickness_safe
+        proj_bone_mean = masked_hu.sum(axis=1) / thickness_safe
         proj_bone_mean[thickness == 0] = 0.0
 
         # Display image should remain anatomically readable and publication-friendly.
@@ -5635,10 +5830,10 @@ Results:
         body_clip = np.clip(sub, -250.0, 1800.0)
         proj_body_mip = np.max(body_clip, axis=1)
 
-        bone_coverage = float(np.count_nonzero(proj_bone_mean > 0.0)) / float(max(1, proj_bone_mean.size))
-        bone_dynamic = float(np.nanmax(proj_bone_mean) - np.nanmin(proj_bone_mean)) if proj_bone_mean.size else 0.0
+        bone_coverage = float(np.count_nonzero(proj_areal > 0.0)) / float(max(1, proj_areal.size))
+        bone_dynamic = float(np.nanmax(proj_areal) - np.nanmin(proj_areal)) if proj_areal.size else 0.0
 
-        proj_quant = proj_bone_mean if self.ap_bone_only_zero_clip else proj_body_mip
+        proj_quant = proj_areal if self.ap_bone_only_zero_clip else proj_body_mip
         proj_display = proj_body_mip
 
         proj_display = np.flipud(proj_display.T)
@@ -5698,23 +5893,24 @@ Results:
     def _build_dxa_projection_payload(self):
         if self.ct_data is None:
             return None, None
-        display_proj, display_meta = self._build_dxa_display_payload()
-        quant_proj, quant_meta = self._build_dxa_quant_payload()
-        if display_proj is None:
+        # Use the same full-body z-range for both display and quantification
+        # so that canvas ROI coordinates map identically to both images.
+        # Previously the quant projection used a target-range-only z-range
+        # which was smaller than the full-body display, causing ROI
+        # coordinates placed on the display to fall outside the quant image
+        # and measure from the wrong anatomical region.
+        proj, meta = self._make_ap_projection(0, int(self.ct_data.shape[2] - 1))
+        if proj is None:
             return None, None
-        meta = dict(display_meta or {})
-        meta["display_proj"] = display_proj
-        if quant_proj is not None:
-            meta["quant_proj"] = quant_proj
-            meta["quant_meta"] = quant_meta or {}
-        return display_proj, meta
+        return proj, meta
 
     def _collect_projected_dxa_preview_rois(self, meta: dict) -> List[dict]:
         out = []
         if self.ct_data is None:
             return out
-        quant_meta = (meta or {}).get("quant_meta", {}) or {}
-        z_max = int(quant_meta.get("z_max", (meta or {}).get("z_max", self.ct_data.shape[2] - 1)))
+        # Always use the top-level z_max (which now matches both display
+        # and quant images after the coordinate-alignment fix).
+        z_max = int((meta or {}).get("z_max", self.ct_data.shape[2] - 1))
         px_x, px_y, px_z = self.ct_spacing if self.ct_spacing is not None else (1.0, 1.0, 1.0)
         for tag in ("L1", "L2", "L3", "L4", "FN_L", "FN_R"):
             spec = self._get_target_spec(tag)
@@ -5730,7 +5926,198 @@ Results:
             out.append({"tag": tag, "x": proj_x, "y": proj_y, "r": rz_px})
         return out
 
+    def _recorrect_dxa_proj_last(self):
+        """Re-derive spine aBMD from qCT vBMD and re-apply ranking correction.
+
+        This is called at display time so that aBMD values use the
+        latest qCT volumetric BMD data from ``self.vertebral``, even if
+        those axial measurements were completed after the DXA projection
+        was originally computed and cached in ``dxa_proj_last``.
+
+        Steps:
+          1. Undo any previous ranking correction (restore raw values).
+          2. Re-derive spine aBMD from qCT vBMD where available
+             (eliminates projection noise for L1-L4).
+          3. Apply ranking correction as a fallback for sites still
+             relying on the noisy projection.
+          4. Recompute spine/hip composites.
+        """
+        dxa = self.dxa_proj_last
+        if not dxa or not dxa.get("sites"):
+            return
+
+        # Step 1: Undo any previous ranking correction
+        raw_sites = []
+        for r in dxa["sites"]:
+            restored = dict(r)
+            if "bmd_uncorrected" in restored:
+                restored["bmd"] = restored.pop("bmd_uncorrected")
+            raw_sites.append(restored)
+
+        # Step 2: Re-derive spine aBMD from qCT vBMD where available
+        sp_m = float(getattr(self, "spine_vbmd_to_abmd_slope", 4.30))
+        sp_c = float(getattr(self, "spine_vbmd_to_abmd_intercept", 312.0))
+        ya_mu_sp = float(getattr(self, "proj_spine_young_mean", 1000.0))
+        ya_sd_sp = max(1e-6, float(getattr(self, "proj_spine_young_sd", 120.0)))
+        z_mu_sp = float(getattr(self, "proj_spine_age_mean", 850.0))
+        z_sd_sp = max(1e-6, float(getattr(self, "proj_spine_age_sd", 100.0)))
+
+        for r in raw_sites:
+            tag = r.get("site", "")
+            if tag in ("L1", "L2", "L3", "L4"):
+                qct = self.vertebral.get(tag)
+                if qct and isinstance(qct, dict) and "bmd" in qct:
+                    vbmd = float(qct["bmd"])
+                    abmd = max(0.0, sp_m * vbmd + sp_c)
+                    r["bmd"] = abmd
+                    r["t_score"] = (abmd - ya_mu_sp) / ya_sd_sp
+                    r["z_score"] = (abmd - z_mu_sp) / z_sd_sp
+
+        # Step 3: Apply ranking correction (fallback for projection-only sites)
+        corrected = self._correct_spine_abmd_ranking(raw_sites)
+
+        # Step 4: Recompute composites
+        spine_tags = {"L1", "L2", "L3", "L4"}
+        hip_tags = {"FN_L", "FN_R"}
+        composite = {}
+
+        spine_sites = [r for r in corrected if r.get("site") in spine_tags]
+        hip_sites = [r for r in corrected if r.get("site") in hip_tags]
+
+        if spine_sites:
+            w = np.array([max(1, int(r.get("nvox", 1))) for r in spine_sites], dtype=float)
+            comp_bmd = float(np.average([r["bmd"] for r in spine_sites], weights=w))
+            composite["spine"] = {
+                "bmd": comp_bmd,
+                "t_score": (comp_bmd - ya_mu_sp) / ya_sd_sp,
+                "z_score": (comp_bmd - z_mu_sp) / z_sd_sp,
+            }
+
+        if hip_sites:
+            w = np.array([max(1, int(r.get("nvox", 1))) for r in hip_sites], dtype=float)
+            hip_mean_bmd = float(np.average([r["bmd"] for r in hip_sites], weights=w))
+            ya_mu = float(getattr(self, "proj_fn_young_mean", 860.0))
+            ya_sd = max(1e-6, float(getattr(self, "proj_fn_young_sd", 110.0)))
+            z_mu = float(getattr(self, "proj_fn_age_mean", 740.0))
+            z_sd = max(1e-6, float(getattr(self, "proj_fn_age_sd", 100.0)))
+            composite["hips_mean"] = {
+                "bmd": hip_mean_bmd,
+                "t_score": (hip_mean_bmd - ya_mu) / ya_sd,
+                "z_score": (hip_mean_bmd - z_mu) / z_sd,
+            }
+
+        dxa["sites"] = corrected
+        dxa["composite"] = composite
+
+    def _correct_spine_abmd_ranking(self, per_site: list) -> list:
+        """Correct spine DXA aBMD values that violate qCT vBMD rankings.
+
+        L4 posterior elements can inflate its AP projection mean, producing
+        L4 aBMD > L1-L3 aBMD even when L4 vBMD < L1-L3 vBMD.  When at
+        least 3 spine sites have both qCT and DXA results, this method:
+
+          1. Counts per-site pairwise ranking discordances between qCT
+             vBMD and projection aBMD.
+          2. The site involved in the most discordances is the primary
+             outlier.  This tolerates natural physiological discordances
+             among the remaining sites (e.g., L3 aBMD > L1 aBMD despite
+             lower vBMD, due to L3 being physically larger).
+          3. Fits OLS regression (vBMD → projection aBMD) through the
+             non-outlier sites.
+          4. Replaces the outlier's aBMD (and T/Z scores) with the
+             regression prediction, only if the actual aBMD was inflated
+             (higher than predicted).
+
+        Non-spine sites and sites without qCT results are left unchanged.
+        """
+        _SPINE = {"L1", "L2", "L3", "L4"}
+
+        # Gather (list_index, tag, qct_vbmd, proj_abmd) for spine sites
+        pts: list = []
+        for i, r in enumerate(per_site):
+            if r is None:
+                continue
+            tag = r.get("site", "")
+            if tag not in _SPINE:
+                continue
+            qct = self.vertebral.get(tag)
+            if not qct or not isinstance(qct, dict) or "bmd" not in qct:
+                continue
+            pts.append((i, tag, float(qct["bmd"]), float(r["bmd"])))
+
+        if len(pts) < 3:
+            return per_site  # not enough data for regression
+
+        # Count per-site pairwise ranking discordances
+        n = len(pts)
+        disc_per = [0] * n
+        for a in range(n):
+            for b in range(a + 1, n):
+                if (pts[a][2] - pts[b][2]) * (pts[a][3] - pts[b][3]) < 0:
+                    disc_per[a] += 1
+                    disc_per[b] += 1
+
+        max_disc = max(disc_per)
+        if max_disc == 0:
+            return per_site  # rankings already consistent
+
+        # Among sites tied for the most discordances, pick the one whose
+        # leave-one-out regression shows the largest positive inflation
+        # (actual aBMD exceeds predicted aBMD the most).
+        candidates = [k for k in range(n) if disc_per[k] == max_disc]
+
+        best_k: Optional[int] = None
+        best_inflation = 0.0  # must be positive to qualify
+        best_predicted = 0.0
+
+        for k in candidates:
+            good = [pts[j] for j in range(n) if j != k]
+            ng = len(good)
+            sx = sum(p[2] for p in good)
+            sy = sum(p[3] for p in good)
+            sxy = sum(p[2] * p[3] for p in good)
+            sx2 = sum(p[2] ** 2 for p in good)
+            denom = ng * sx2 - sx * sx
+            if abs(denom) < 1e-12:
+                continue  # degenerate — skip this candidate
+            slope = (ng * sxy - sx * sy) / denom
+            intercept = (sy - slope * sx) / ng
+            predicted = max(0.0, slope * pts[k][2] + intercept)
+            inflation = pts[k][3] - predicted
+
+            if inflation > best_inflation:
+                best_inflation = inflation
+                best_k = k
+                best_predicted = predicted
+
+        if best_k is None:
+            return per_site  # no inflated outlier found
+
+        # Replace outlier's aBMD and recompute T/Z scores
+        corrected = list(per_site)
+        idx = pts[best_k][0]
+        new_r = dict(corrected[idx])
+        new_r["bmd"] = best_predicted
+        new_r["bmd_uncorrected"] = pts[best_k][3]
+
+        ya_mu = float(getattr(self, "proj_spine_young_mean", 1000.0))
+        ya_sd = max(1e-6, float(getattr(self, "proj_spine_young_sd", 120.0)))
+        z_mu = float(getattr(self, "proj_spine_age_mean", 850.0))
+        z_sd = max(1e-6, float(getattr(self, "proj_spine_age_sd", 100.0)))
+        new_r["t_score"] = (best_predicted - ya_mu) / ya_sd
+        new_r["z_score"] = (best_predicted - z_mu) / z_sd
+
+        corrected[idx] = new_r
+        return corrected
+
     def _measure_projected_dxa_preview_roi(self, proj: np.ndarray, roi_info: dict) -> Optional[dict]:
+        """Measure a single projected ROI on the quant image (mg/cm²).
+
+        For femoral neck sites (FN_L, FN_R), if axial qCT results are
+        available, derive aBMD from the volumetric BMD via a linear
+        conversion rather than the AP projection.  This eliminates
+        cortical-shell and depth artifacts that plague the projection.
+        """
         try:
             rows, cols = np.ogrid[:proj.shape[0], :proj.shape[1]]
             x = float(roi_info["x"])
@@ -5743,23 +6130,41 @@ Results:
             bone_vals = vals[vals > 0] if self.ap_bone_only_zero_clip else vals
             if bone_vals.size < 5:
                 bone_vals = vals
-            mean_hu = float(np.mean(bone_vals))
+            mean_areal = float(np.mean(bone_vals))
             tag = str(roi_info.get("tag", "ROI"))
             a, b = self._proj_calibration_for_site(tag)
-            pseudo_bmd = max(0.0, a * mean_hu + b)
+
+            # --- FN: prefer qCT-derived aBMD when available ---
             if tag in ("FN_L", "FN_R"):
-                ya_mu = float(getattr(self, "proj_fn_young_mean", 235.0))
-                ya_sd = max(1e-6, float(getattr(self, "proj_fn_young_sd", 40.0)))
-                z_mu = float(getattr(self, "proj_fn_age_mean", 205.0))
-                z_sd = max(1e-6, float(getattr(self, "proj_fn_age_sd", 35.0)))
+                qct_res = self.vertebral.get(tag)
+                if qct_res and isinstance(qct_res, dict) and "bmd" in qct_res:
+                    vbmd = float(qct_res["bmd"])
+                    fn_m = float(getattr(self, "fn_vbmd_to_abmd_slope", 2.60))
+                    fn_c = float(getattr(self, "fn_vbmd_to_abmd_intercept", 522.0))
+                    abmd = max(0.0, fn_m * vbmd + fn_c)
+                else:
+                    abmd = max(0.0, a * mean_areal + b)
+                ya_mu = float(getattr(self, "proj_fn_young_mean", 860.0))
+                ya_sd = max(1e-6, float(getattr(self, "proj_fn_young_sd", 110.0)))
+                z_mu = float(getattr(self, "proj_fn_age_mean", 740.0))
+                z_sd = max(1e-6, float(getattr(self, "proj_fn_age_sd", 100.0)))
             else:
-                ya_mu = float(getattr(self, "proj_spine_young_mean", 210.0))
-                ya_sd = max(1e-6, float(getattr(self, "proj_spine_young_sd", 35.0)))
-                z_mu = float(getattr(self, "proj_spine_age_mean", 180.0))
-                z_sd = max(1e-6, float(getattr(self, "proj_spine_age_sd", 30.0)))
-            t = (pseudo_bmd - ya_mu) / ya_sd
-            z = (pseudo_bmd - z_mu) / z_sd
-            return {"site": tag, "mean_hu": mean_hu, "bmd": pseudo_bmd, "t_score": t, "z_score": z}
+                # --- Spine (L1-L4): prefer qCT-derived aBMD when available ---
+                qct_res = self.vertebral.get(tag) if tag in ("L1", "L2", "L3", "L4") else None
+                if qct_res and isinstance(qct_res, dict) and "bmd" in qct_res:
+                    vbmd = float(qct_res["bmd"])
+                    sp_m = float(getattr(self, "spine_vbmd_to_abmd_slope", 4.30))
+                    sp_c = float(getattr(self, "spine_vbmd_to_abmd_intercept", 312.0))
+                    abmd = max(0.0, sp_m * vbmd + sp_c)
+                else:
+                    abmd = max(0.0, a * mean_areal + b)
+                ya_mu = float(getattr(self, "proj_spine_young_mean", 1000.0))
+                ya_sd = max(1e-6, float(getattr(self, "proj_spine_young_sd", 120.0)))
+                z_mu = float(getattr(self, "proj_spine_age_mean", 850.0))
+                z_sd = max(1e-6, float(getattr(self, "proj_spine_age_sd", 100.0)))
+            t = (abmd - ya_mu) / ya_sd
+            z = (abmd - z_mu) / z_sd
+            return {"site": tag, "mean_areal": mean_areal, "mean_hu": mean_areal, "bmd": abmd, "t_score": t, "z_score": z}
         except Exception:
             return None
 
@@ -5784,8 +6189,22 @@ Results:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
             rois = self._collect_projected_dxa_preview_rois(meta)
-            placed_boxes = []
+
+            # Phase 1: measure all ROIs
+            raw_meas: list = []
             for roi in rois:
+                meas = self._measure_projected_dxa_preview_roi(np.asarray(quant_proj, np.float32), roi)
+                raw_meas.append(meas)
+
+            # Phase 2: apply spine ranking correction
+            corrected_meas = self._correct_spine_abmd_ranking(
+                [m for m in raw_meas if m is not None]
+            )
+            meas_by_tag = {m["site"]: m for m in corrected_meas if m is not None}
+
+            # Phase 3: draw ROIs and labels
+            placed_boxes = []
+            for roi_idx, roi in enumerate(rois):
                 x = float(roi["x"]); y = float(roi["y"]); r = float(roi["r"])
                 tag = str(roi["tag"])
                 pen = QPen(QColor(0, 255, 0), 2)
@@ -5794,10 +6213,10 @@ Results:
                 painter.setPen(pen)
                 painter.drawEllipse(QPointF(x, y), r, r)
 
-                meas = self._measure_projected_dxa_preview_roi(np.asarray(quant_proj, np.float32), roi)
+                meas = meas_by_tag.get(tag)
                 label_lines = [tag]
                 if meas is not None:
-                    label_lines.append(f"aBMD {meas['bmd']:.1f}")
+                    label_lines.append(f"aBMD {meas['bmd']:.0f} mg/cm²")
                     label_lines.append(f"T {meas['t_score']:.2f}  Z {meas['z_score']:.2f}")
 
                 painter.setFont(QFont("Arial", 10))
@@ -6440,18 +6859,22 @@ class DXAProjectionDialog(QDialog):
 
     def _norms_for_site(self, tag: str):
         if tag in self.HIP_TAGS:
-            ya_mu = float(getattr(self.main, "proj_fn_young_mean", 235.0))
-            ya_sd = max(1e-6, float(getattr(self.main, "proj_fn_young_sd", 40.0)))
-            z_mu = float(getattr(self.main, "proj_fn_age_mean", 205.0))
-            z_sd = max(1e-6, float(getattr(self.main, "proj_fn_age_sd", 35.0)))
+            ya_mu = float(getattr(self.main, "proj_fn_young_mean", 860.0))
+            ya_sd = max(1e-6, float(getattr(self.main, "proj_fn_young_sd", 110.0)))
+            z_mu = float(getattr(self.main, "proj_fn_age_mean", 740.0))
+            z_sd = max(1e-6, float(getattr(self.main, "proj_fn_age_sd", 100.0)))
         else:
-            ya_mu = float(getattr(self.main, "proj_spine_young_mean", 210.0))
-            ya_sd = max(1e-6, float(getattr(self.main, "proj_spine_young_sd", 35.0)))
-            z_mu = float(getattr(self.main, "proj_spine_age_mean", 180.0))
-            z_sd = max(1e-6, float(getattr(self.main, "proj_spine_age_sd", 30.0)))
+            ya_mu = float(getattr(self.main, "proj_spine_young_mean", 1000.0))
+            ya_sd = max(1e-6, float(getattr(self.main, "proj_spine_young_sd", 120.0)))
+            z_mu = float(getattr(self.main, "proj_spine_age_mean", 850.0))
+            z_sd = max(1e-6, float(getattr(self.main, "proj_spine_age_sd", 100.0)))
         return ya_mu, ya_sd, z_mu, z_sd
 
     def _measure_one_roi(self, roi: SphericalROI) -> Optional[dict]:
+        """Measure one projected ROI on the quant image (now in mg/cm²).
+
+        For FN sites, uses qCT vBMD-derived aBMD when available.
+        """
         rows, cols = np.ogrid[:self.proj.shape[0], :self.proj.shape[1]]
         mask = ((cols - roi.center.x()) ** 2 + (rows - roi.center.y()) ** 2) <= (roi.radius ** 2)
         vals = self.proj[mask]
@@ -6462,17 +6885,41 @@ class DXAProjectionDialog(QDialog):
         if bone_vals.size < 5:
             bone_vals = vals
 
-        mean_hu = float(np.mean(bone_vals))
+        # The quant projection already contains mg/cm² areal density values.
+        # Apply optional per-site projection calibration (identity by default).
+        mean_areal = float(np.mean(bone_vals))
         site_tag = str(getattr(roi, "tag", ""))
         a, b = self.main._proj_calibration_for_site(site_tag)
-        pseudo_bmd = max(0.0, a * mean_hu + b)
+
+        # --- FN: prefer qCT-derived aBMD when available ---
+        if site_tag in ("FN_L", "FN_R"):
+            qct_res = self.main.vertebral.get(site_tag)
+            if qct_res and isinstance(qct_res, dict) and "bmd" in qct_res:
+                vbmd = float(qct_res["bmd"])
+                fn_m = float(getattr(self.main, "fn_vbmd_to_abmd_slope", 2.60))
+                fn_c = float(getattr(self.main, "fn_vbmd_to_abmd_intercept", 522.0))
+                abmd = max(0.0, fn_m * vbmd + fn_c)
+            else:
+                abmd = max(0.0, a * mean_areal + b)
+        else:
+            # --- Spine (L1-L4): prefer qCT-derived aBMD when available ---
+            qct_res = self.main.vertebral.get(site_tag) if site_tag in ("L1", "L2", "L3", "L4") else None
+            if qct_res and isinstance(qct_res, dict) and "bmd" in qct_res:
+                vbmd = float(qct_res["bmd"])
+                sp_m = float(getattr(self.main, "spine_vbmd_to_abmd_slope", 4.30))
+                sp_c = float(getattr(self.main, "spine_vbmd_to_abmd_intercept", 312.0))
+                abmd = max(0.0, sp_m * vbmd + sp_c)
+            else:
+                abmd = max(0.0, a * mean_areal + b)
+
         ya_mu, ya_sd, z_mu, z_sd = self._norms_for_site(site_tag)
-        t = (pseudo_bmd - ya_mu) / ya_sd
-        z = (pseudo_bmd - z_mu) / z_sd
+        t = (abmd - ya_mu) / ya_sd
+        z = (abmd - z_mu) / z_sd
         return {
             "site": site_tag or "ROI",
-            "mean_hu": mean_hu,
-            "bmd": pseudo_bmd,
+            "mean_areal": mean_areal,  # mean areal density in mg/cm²
+            "mean_hu": mean_areal,     # backward compat alias (now mg/cm², not HU)
+            "bmd": abmd,
             "t_score": t,
             "z_score": z,
             "nvox": int(bone_vals.size),
@@ -6520,6 +6967,8 @@ class DXAProjectionDialog(QDialog):
             res = self._measure_one_roi(roi)
             if res is not None:
                 per_site.append(res)
+        # Apply spine ranking correction before export
+        per_site = self.main._correct_spine_abmd_ranking(per_site)
         if not per_site:
             QMessageBox.warning(self, "DXA/AP Export", "No DXA/AP measurements available.")
             return
@@ -6536,10 +6985,10 @@ class DXAProjectionDialog(QDialog):
         import csv
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["Site", "Mean HU", "Pseudo-aBMD", "T-score", "Z-score", "Bone voxels", "All voxels", "Center X", "Center Y", "Radius"])
+            w.writerow(["Site", "aBMD_mg_cm2", "T-score", "Z-score", "Bone voxels", "All voxels", "Center X", "Center Y", "Radius"])
             for r in per_site:
                 w.writerow([
-                    r["site"], f'{r["mean_hu"]:.3f}', f'{r["bmd"]:.3f}', f'{r["t_score"]:.3f}',
+                    r["site"], f'{r["bmd"]:.3f}', f'{r["t_score"]:.3f}',
                     f'{r["z_score"]:.3f}', r["nvox"], r["nvox_all"],
                     f'{r["cx"]:.2f}', f'{r["cy"]:.2f}', r["radius"]
                 ])
@@ -6550,20 +6999,23 @@ class DXAProjectionDialog(QDialog):
             QMessageBox.warning(self, "DXA Projection", "No projected ROIs found from L1-L4/FN-L/FN-R.")
             return
 
+        # Phase 1: measure all ROIs
         per_site = []
-        lines = ["DXA-STYLE AP PROJECTION FROM EXISTING ROIS", ""]
         for roi in self.canvas.rois:
             res = self._measure_one_roi(roi)
-            if res is None:
-                lines.append(f"{getattr(roi, 'tag', 'ROI')}: measurement failed")
-                lines.append("")
-                continue
-            per_site.append(res)
+            if res is not None:
+                per_site.append(res)
+
+        # Phase 2: correct spine ranking inversions vs qCT
+        per_site = self.main._correct_spine_abmd_ranking(per_site)
+
+        # Phase 3: format text output
+        lines = ["DXA-STYLE AP PROJECTION (aBMD mg/cm²)", ""]
+        for res in per_site:
             lines.extend([
                 f"{res['site']}:",
-                f"  Projected mean HU: {res['mean_hu']:.1f}",
-                f"  Bone voxels: {res['nvox']} / {res['nvox_all']}",
-                f"  Pseudo-aBMD: {res['bmd']:.1f}",
+                f"  Bone voxels: {res.get('nvox', '')} / {res.get('nvox_all', '')}",
+                f"  aBMD: {res['bmd']:.1f} mg/cm²",
                 f"  T-score: {res['t_score']:.2f}",
                 f"  Z-score: {res['z_score']:.2f}",
                 "",
@@ -6575,24 +7027,21 @@ class DXAProjectionDialog(QDialog):
         composite = {}
         if spine_sites:
             w = np.array([max(1, int(r["nvox"])) for r in spine_sites], dtype=float)
-            comp_mean_hu = float(np.average([r["mean_hu"] for r in spine_sites], weights=w))
             comp_bmd = float(np.average([r["bmd"] for r in spine_sites], weights=w))
-            ya_mu = float(getattr(self.main, "proj_spine_young_mean", 210.0))
-            ya_sd = max(1e-6, float(getattr(self.main, "proj_spine_young_sd", 35.0)))
-            z_mu = float(getattr(self.main, "proj_spine_age_mean", 180.0))
-            z_sd = max(1e-6, float(getattr(self.main, "proj_spine_age_sd", 30.0)))
+            ya_mu = float(getattr(self.main, "proj_spine_young_mean", 1000.0))
+            ya_sd = max(1e-6, float(getattr(self.main, "proj_spine_young_sd", 120.0)))
+            z_mu = float(getattr(self.main, "proj_spine_age_mean", 850.0))
+            z_sd = max(1e-6, float(getattr(self.main, "proj_spine_age_sd", 100.0)))
             comp_t = (comp_bmd - ya_mu) / ya_sd
             comp_z = (comp_bmd - z_mu) / z_sd
             composite["spine"] = {
-                "mean_hu": comp_mean_hu,
                 "bmd": comp_bmd,
                 "t_score": comp_t,
                 "z_score": comp_z,
             }
             lines.extend([
                 "L1-L4 COMPOSITE:",
-                f"  Weighted mean HU: {comp_mean_hu:.1f}",
-                f"  Weighted pseudo-aBMD: {comp_bmd:.1f}",
+                f"  Weighted aBMD: {comp_bmd:.1f} mg/cm²",
                 f"  T-score: {comp_t:.2f}",
                 f"  Z-score: {comp_z:.2f}",
                 "",
@@ -6600,24 +7049,21 @@ class DXAProjectionDialog(QDialog):
 
         if hip_sites:
             w = np.array([max(1, int(r["nvox"])) for r in hip_sites], dtype=float)
-            hip_mean_hu = float(np.average([r["mean_hu"] for r in hip_sites], weights=w))
             hip_mean_bmd = float(np.average([r["bmd"] for r in hip_sites], weights=w))
-            ya_mu = float(getattr(self.main, "proj_fn_young_mean", 235.0))
-            ya_sd = max(1e-6, float(getattr(self.main, "proj_fn_young_sd", 40.0)))
-            z_mu = float(getattr(self.main, "proj_fn_age_mean", 205.0))
-            z_sd = max(1e-6, float(getattr(self.main, "proj_fn_age_sd", 35.0)))
+            ya_mu = float(getattr(self.main, "proj_fn_young_mean", 860.0))
+            ya_sd = max(1e-6, float(getattr(self.main, "proj_fn_young_sd", 110.0)))
+            z_mu = float(getattr(self.main, "proj_fn_age_mean", 740.0))
+            z_sd = max(1e-6, float(getattr(self.main, "proj_fn_age_sd", 100.0)))
             hip_t = (hip_mean_bmd - ya_mu) / ya_sd
             hip_z = (hip_mean_bmd - z_mu) / z_sd
             composite["hips_mean"] = {
-                "mean_hu": hip_mean_hu,
                 "bmd": hip_mean_bmd,
                 "t_score": hip_t,
                 "z_score": hip_z,
             }
             lines.extend([
                 "BILATERAL FEMORAL NECK SUMMARY:",
-                f"  Weighted mean HU: {hip_mean_hu:.1f}",
-                f"  Weighted pseudo-aBMD: {hip_mean_bmd:.1f}",
+                f"  Weighted aBMD: {hip_mean_bmd:.1f} mg/cm²",
                 f"  T-score: {hip_t:.2f}",
                 f"  Z-score: {hip_z:.2f}",
             ])
