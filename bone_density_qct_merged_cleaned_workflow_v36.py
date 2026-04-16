@@ -1298,6 +1298,26 @@ class BoneDensityAnalyzer(QMainWindow):
         #   vBMD ~  65 mg/cm³ (osteoporotic) → aBMD ~ 690 mg/cm²
         self.fn_vbmd_to_abmd_slope = 2.60
         self.fn_vbmd_to_abmd_intercept = 522.0
+        # Spine pseudo-DXA from qCT vBMD: same principle as FN above.
+        # When axial qCT results exist for a spine site, derive aBMD
+        # directly from vBMD rather than the noisy AP projection.
+        # The AP projection produces large aBMD discrepancies between
+        # vertebrae with similar vBMD (e.g. L1 vs L2) due to differences
+        # in vertebral body size, posterior element overlap, and soft-
+        # tissue path length.  The linear conversion maps qCT vBMD to
+        # the DXA aBMD scale, preserving T-score equivalence.
+        #   aBMD (mg/cm²) = spine_vbmd_to_abmd_slope × vBMD + spine_vbmd_to_abmd_intercept
+        # Calibrated from female qCT/DXA norms:
+        #   qCT young-adult spine vBMD  = 160 mg/cm³, SD = 28
+        #   DXA young-adult spine aBMD  = 1000 mg/cm², SD = 120
+        #   slope = DXA_SD / qCT_SD ≈ 4.30
+        #   intercept = DXA_mean − slope × qCT_mean ≈ 312
+        # Example mappings (female):
+        #   vBMD ~ 160 mg/cm³ (young adult)  → aBMD ~ 1000 mg/cm²  (T ≈ 0)
+        #   vBMD ~ 120 mg/cm³ (osteopenic)   → aBMD ~  828 mg/cm²  (T ≈ −1.4)
+        #   vBMD ~  80 mg/cm³ (osteoporotic)  → aBMD ~  656 mg/cm²  (T ≈ −2.9)
+        self.spine_vbmd_to_abmd_slope = 4.30
+        self.spine_vbmd_to_abmd_intercept = 312.0
         self.ap_bone_only_zero_clip = True
         self.ap_auto_hu_min = True
         self.ap_show_thickness_overlay = True
@@ -5907,33 +5927,56 @@ Results:
         return out
 
     def _recorrect_dxa_proj_last(self):
-        """Re-apply spine aBMD ranking correction to cached DXA results.
+        """Re-derive spine aBMD from qCT vBMD and re-apply ranking correction.
 
-        This is called at display time so that the correction uses the
+        This is called at display time so that aBMD values use the
         latest qCT volumetric BMD data from ``self.vertebral``, even if
         those axial measurements were completed after the DXA projection
         was originally computed and cached in ``dxa_proj_last``.
 
-        Also recomputes spine/hip composites to reflect any corrections.
+        Steps:
+          1. Undo any previous ranking correction (restore raw values).
+          2. Re-derive spine aBMD from qCT vBMD where available
+             (eliminates projection noise for L1-L4).
+          3. Apply ranking correction as a fallback for sites still
+             relying on the noisy projection.
+          4. Recompute spine/hip composites.
         """
         dxa = self.dxa_proj_last
         if not dxa or not dxa.get("sites"):
             return
 
-        # Undo any previous correction (restore uncorrected aBMD) so the
-        # algorithm starts from the raw projection values each time.
+        # Step 1: Undo any previous ranking correction
         raw_sites = []
         for r in dxa["sites"]:
-            if "bmd_uncorrected" in r:
-                restored = dict(r)
+            restored = dict(r)
+            if "bmd_uncorrected" in restored:
                 restored["bmd"] = restored.pop("bmd_uncorrected")
-                raw_sites.append(restored)
-            else:
-                raw_sites.append(r)
+            raw_sites.append(restored)
 
+        # Step 2: Re-derive spine aBMD from qCT vBMD where available
+        sp_m = float(getattr(self, "spine_vbmd_to_abmd_slope", 4.30))
+        sp_c = float(getattr(self, "spine_vbmd_to_abmd_intercept", 312.0))
+        ya_mu_sp = float(getattr(self, "proj_spine_young_mean", 1000.0))
+        ya_sd_sp = max(1e-6, float(getattr(self, "proj_spine_young_sd", 120.0)))
+        z_mu_sp = float(getattr(self, "proj_spine_age_mean", 850.0))
+        z_sd_sp = max(1e-6, float(getattr(self, "proj_spine_age_sd", 100.0)))
+
+        for r in raw_sites:
+            tag = r.get("site", "")
+            if tag in ("L1", "L2", "L3", "L4"):
+                qct = self.vertebral.get(tag)
+                if qct and isinstance(qct, dict) and "bmd" in qct:
+                    vbmd = float(qct["bmd"])
+                    abmd = max(0.0, sp_m * vbmd + sp_c)
+                    r["bmd"] = abmd
+                    r["t_score"] = (abmd - ya_mu_sp) / ya_sd_sp
+                    r["z_score"] = (abmd - z_mu_sp) / z_sd_sp
+
+        # Step 3: Apply ranking correction (fallback for projection-only sites)
         corrected = self._correct_spine_abmd_ranking(raw_sites)
 
-        # Recompute composites from the (possibly corrected) per-site data
+        # Step 4: Recompute composites
         spine_tags = {"L1", "L2", "L3", "L4"}
         hip_tags = {"FN_L", "FN_R"}
         composite = {}
@@ -5944,14 +5987,10 @@ Results:
         if spine_sites:
             w = np.array([max(1, int(r.get("nvox", 1))) for r in spine_sites], dtype=float)
             comp_bmd = float(np.average([r["bmd"] for r in spine_sites], weights=w))
-            ya_mu = float(getattr(self, "proj_spine_young_mean", 1000.0))
-            ya_sd = max(1e-6, float(getattr(self, "proj_spine_young_sd", 120.0)))
-            z_mu = float(getattr(self, "proj_spine_age_mean", 850.0))
-            z_sd = max(1e-6, float(getattr(self, "proj_spine_age_sd", 100.0)))
             composite["spine"] = {
                 "bmd": comp_bmd,
-                "t_score": (comp_bmd - ya_mu) / ya_sd,
-                "z_score": (comp_bmd - z_mu) / z_sd,
+                "t_score": (comp_bmd - ya_mu_sp) / ya_sd_sp,
+                "z_score": (comp_bmd - z_mu_sp) / z_sd_sp,
             }
 
         if hip_sites:
@@ -6110,7 +6149,15 @@ Results:
                 z_mu = float(getattr(self, "proj_fn_age_mean", 740.0))
                 z_sd = max(1e-6, float(getattr(self, "proj_fn_age_sd", 100.0)))
             else:
-                abmd = max(0.0, a * mean_areal + b)
+                # --- Spine (L1-L4): prefer qCT-derived aBMD when available ---
+                qct_res = self.vertebral.get(tag) if tag in ("L1", "L2", "L3", "L4") else None
+                if qct_res and isinstance(qct_res, dict) and "bmd" in qct_res:
+                    vbmd = float(qct_res["bmd"])
+                    sp_m = float(getattr(self, "spine_vbmd_to_abmd_slope", 4.30))
+                    sp_c = float(getattr(self, "spine_vbmd_to_abmd_intercept", 312.0))
+                    abmd = max(0.0, sp_m * vbmd + sp_c)
+                else:
+                    abmd = max(0.0, a * mean_areal + b)
                 ya_mu = float(getattr(self, "proj_spine_young_mean", 1000.0))
                 ya_sd = max(1e-6, float(getattr(self, "proj_spine_young_sd", 120.0)))
                 z_mu = float(getattr(self, "proj_spine_age_mean", 850.0))
@@ -6855,7 +6902,15 @@ class DXAProjectionDialog(QDialog):
             else:
                 abmd = max(0.0, a * mean_areal + b)
         else:
-            abmd = max(0.0, a * mean_areal + b)
+            # --- Spine (L1-L4): prefer qCT-derived aBMD when available ---
+            qct_res = self.main.vertebral.get(site_tag) if site_tag in ("L1", "L2", "L3", "L4") else None
+            if qct_res and isinstance(qct_res, dict) and "bmd" in qct_res:
+                vbmd = float(qct_res["bmd"])
+                sp_m = float(getattr(self.main, "spine_vbmd_to_abmd_slope", 4.30))
+                sp_c = float(getattr(self.main, "spine_vbmd_to_abmd_intercept", 312.0))
+                abmd = max(0.0, sp_m * vbmd + sp_c)
+            else:
+                abmd = max(0.0, a * mean_areal + b)
 
         ya_mu, ya_sd, z_mu, z_sd = self._norms_for_site(site_tag)
         t = (abmd - ya_mu) / ya_sd
