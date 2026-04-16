@@ -5899,6 +5899,111 @@ Results:
             out.append({"tag": tag, "x": proj_x, "y": proj_y, "r": rz_px})
         return out
 
+    def _correct_spine_abmd_ranking(self, per_site: list) -> list:
+        """Correct spine DXA aBMD values that violate qCT vBMD rankings.
+
+        L4 posterior elements can inflate its AP projection mean, producing
+        L4 aBMD > L1 aBMD even when L4 vBMD < L1 vBMD.  When at least
+        3 spine sites have both qCT and DXA results, this method:
+
+          1. Detects pairwise ranking inversions between qCT vBMD and
+             projection aBMD (Kendall concordance check).
+          2. Identifies the single outlier whose removal restores rank
+             consistency among the remaining sites.
+          3. Fits OLS regression (vBMD → projection aBMD) through the
+             consistent (non-outlier) sites.
+          4. Replaces the outlier's aBMD (and T/Z scores) with the
+             regression prediction.
+
+        Non-spine sites, sites without qCT results, and cases with
+        multiple simultaneous inversions are left unchanged.
+        """
+        _SPINE = {"L1", "L2", "L3", "L4"}
+
+        # Gather (list_index, tag, qct_vbmd, proj_abmd) for spine sites
+        pts: list = []
+        for i, r in enumerate(per_site):
+            if r is None:
+                continue
+            tag = r.get("site", "")
+            if tag not in _SPINE:
+                continue
+            qct = self.vertebral.get(tag)
+            if not qct or not isinstance(qct, dict) or "bmd" not in qct:
+                continue
+            pts.append((i, tag, float(qct["bmd"]), float(r["bmd"])))
+
+        if len(pts) < 3:
+            return per_site  # not enough data for regression
+
+        # Count pairwise ranking discordances
+        n = len(pts)
+        discordant = 0
+        for a in range(n):
+            for b in range(a + 1, n):
+                if (pts[a][2] - pts[b][2]) * (pts[a][3] - pts[b][3]) < 0:
+                    discordant += 1
+
+        if discordant == 0:
+            return per_site  # rankings already consistent
+
+        # Identify the single outlier whose removal restores consistency
+        outlier_k: Optional[int] = None
+        for leave_out in range(n):
+            rest = [pts[j] for j in range(n) if j != leave_out]
+            ok = True
+            for a in range(len(rest)):
+                for b in range(a + 1, len(rest)):
+                    if (rest[a][2] - rest[b][2]) * (rest[a][3] - rest[b][3]) < 0:
+                        ok = False
+                        break
+                if not ok:
+                    break
+            if ok:
+                outlier_k = leave_out
+                break
+
+        if outlier_k is None:
+            return per_site  # multiple simultaneous inversions — skip
+
+        # OLS regression through the non-outlier points
+        good = [pts[j] for j in range(n) if j != outlier_k]
+        ng = len(good)
+        sx = sum(p[2] for p in good)
+        sy = sum(p[3] for p in good)
+        sxy = sum(p[2] * p[3] for p in good)
+        sx2 = sum(p[2] ** 2 for p in good)
+        denom = ng * sx2 - sx * sx
+        if abs(denom) < 1e-12:
+            return per_site  # degenerate
+
+        slope = (ng * sxy - sx * sy) / denom
+        intercept = (sy - slope * sx) / ng
+
+        idx, o_tag, o_vbmd, o_abmd = pts[outlier_k]
+        predicted = max(0.0, slope * o_vbmd + intercept)
+
+        # Only correct if projection was HIGHER than predicted
+        # (posterior-element inflation, not deflation).
+        if o_abmd <= predicted:
+            return per_site
+
+        # Replace outlier's aBMD and recompute T/Z scores
+        corrected = list(per_site)
+        new_r = dict(corrected[idx])
+        new_r["bmd"] = predicted
+        new_r["bmd_uncorrected"] = o_abmd
+
+        ya_mu = float(getattr(self, "proj_spine_young_mean", 1000.0))
+        ya_sd = max(1e-6, float(getattr(self, "proj_spine_young_sd", 120.0)))
+        z_mu = float(getattr(self, "proj_spine_age_mean", 850.0))
+        z_sd = max(1e-6, float(getattr(self, "proj_spine_age_sd", 100.0)))
+        new_r["t_score"] = (predicted - ya_mu) / ya_sd
+        new_r["z_score"] = (predicted - z_mu) / z_sd
+
+        corrected[idx] = new_r
+        return corrected
+
     def _measure_projected_dxa_preview_roi(self, proj: np.ndarray, roi_info: dict) -> Optional[dict]:
         """Measure a single projected ROI on the quant image (mg/cm²).
 
@@ -5970,8 +6075,22 @@ Results:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
             rois = self._collect_projected_dxa_preview_rois(meta)
-            placed_boxes = []
+
+            # Phase 1: measure all ROIs
+            raw_meas: list = []
             for roi in rois:
+                meas = self._measure_projected_dxa_preview_roi(np.asarray(quant_proj, np.float32), roi)
+                raw_meas.append(meas)
+
+            # Phase 2: apply spine ranking correction
+            corrected_meas = self._correct_spine_abmd_ranking(
+                [m for m in raw_meas if m is not None]
+            )
+            meas_by_tag = {m["site"]: m for m in corrected_meas if m is not None}
+
+            # Phase 3: draw ROIs and labels
+            placed_boxes = []
+            for roi_idx, roi in enumerate(rois):
                 x = float(roi["x"]); y = float(roi["y"]); r = float(roi["r"])
                 tag = str(roi["tag"])
                 pen = QPen(QColor(0, 255, 0), 2)
@@ -5980,7 +6099,7 @@ Results:
                 painter.setPen(pen)
                 painter.drawEllipse(QPointF(x, y), r, r)
 
-                meas = self._measure_projected_dxa_preview_roi(np.asarray(quant_proj, np.float32), roi)
+                meas = meas_by_tag.get(tag)
                 label_lines = [tag]
                 if meas is not None:
                     label_lines.append(f"aBMD {meas['bmd']:.0f} mg/cm²")
@@ -6726,6 +6845,8 @@ class DXAProjectionDialog(QDialog):
             res = self._measure_one_roi(roi)
             if res is not None:
                 per_site.append(res)
+        # Apply spine ranking correction before export
+        per_site = self.main._correct_spine_abmd_ranking(per_site)
         if not per_site:
             QMessageBox.warning(self, "DXA/AP Export", "No DXA/AP measurements available.")
             return
@@ -6756,18 +6877,22 @@ class DXAProjectionDialog(QDialog):
             QMessageBox.warning(self, "DXA Projection", "No projected ROIs found from L1-L4/FN-L/FN-R.")
             return
 
+        # Phase 1: measure all ROIs
         per_site = []
-        lines = ["DXA-STYLE AP PROJECTION (aBMD mg/cm²)", ""]
         for roi in self.canvas.rois:
             res = self._measure_one_roi(roi)
-            if res is None:
-                lines.append(f"{getattr(roi, 'tag', 'ROI')}: measurement failed")
-                lines.append("")
-                continue
-            per_site.append(res)
+            if res is not None:
+                per_site.append(res)
+
+        # Phase 2: correct spine ranking inversions vs qCT
+        per_site = self.main._correct_spine_abmd_ranking(per_site)
+
+        # Phase 3: format text output
+        lines = ["DXA-STYLE AP PROJECTION (aBMD mg/cm²)", ""]
+        for res in per_site:
             lines.extend([
                 f"{res['site']}:",
-                f"  Bone voxels: {res['nvox']} / {res['nvox_all']}",
+                f"  Bone voxels: {res.get('nvox', '')} / {res.get('nvox_all', '')}",
                 f"  aBMD: {res['bmd']:.1f} mg/cm²",
                 f"  T-score: {res['t_score']:.2f}",
                 f"  Z-score: {res['z_score']:.2f}",
