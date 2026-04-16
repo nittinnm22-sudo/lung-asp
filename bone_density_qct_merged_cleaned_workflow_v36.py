@@ -2922,6 +2922,12 @@ class BoneDensityAnalyzer(QMainWindow):
     def open_results_window(self):
         ct_rows = [self.vertebral.get(site) for site in self.site_names if self.vertebral.get(site)]
         self._ensure_dxa_projection_results(force=False)
+        # Re-apply spine ranking correction using latest qCT data.
+        # The correction depends on self.vertebral (axial qCT vBMD), which
+        # may not have been populated when the DXA projection was first
+        # computed and cached in dxa_proj_last.  Re-correcting here ensures
+        # the latest qCT results are always reflected.
+        self._recorrect_dxa_proj_last()
         dxa_rows = list((self.dxa_proj_last or {}).get("sites", []) or [])
         has_spine_comp = bool(((self.dxa_proj_last or {}).get("composite", {}) or {}).get("spine"))
         has_hip_comp = bool(((self.dxa_proj_last or {}).get("composite", {}) or {}).get("hips_mean"))
@@ -5512,6 +5518,7 @@ Results:
                     f"  QC: {res.get('qc_status','')}\n\n"
                 )
         if self.dxa_proj_last:
+            self._recorrect_dxa_proj_last()
             d = self.dxa_proj_last
             if "sites" in d:
                 report += "DXA-style AP projection:\n"
@@ -5898,6 +5905,70 @@ Results:
             rz_px = max(5, int(round(rx_mm / max(px_z, 1e-6))))
             out.append({"tag": tag, "x": proj_x, "y": proj_y, "r": rz_px})
         return out
+
+    def _recorrect_dxa_proj_last(self):
+        """Re-apply spine aBMD ranking correction to cached DXA results.
+
+        This is called at display time so that the correction uses the
+        latest qCT volumetric BMD data from ``self.vertebral``, even if
+        those axial measurements were completed after the DXA projection
+        was originally computed and cached in ``dxa_proj_last``.
+
+        Also recomputes spine/hip composites to reflect any corrections.
+        """
+        dxa = self.dxa_proj_last
+        if not dxa or not dxa.get("sites"):
+            return
+
+        # Undo any previous correction (restore uncorrected aBMD) so the
+        # algorithm starts from the raw projection values each time.
+        raw_sites = []
+        for r in dxa["sites"]:
+            if "bmd_uncorrected" in r:
+                restored = dict(r)
+                restored["bmd"] = restored.pop("bmd_uncorrected")
+                raw_sites.append(restored)
+            else:
+                raw_sites.append(r)
+
+        corrected = self._correct_spine_abmd_ranking(raw_sites)
+
+        # Recompute composites from the (possibly corrected) per-site data
+        spine_tags = {"L1", "L2", "L3", "L4"}
+        hip_tags = {"FN_L", "FN_R"}
+        composite = {}
+
+        spine_sites = [r for r in corrected if r.get("site") in spine_tags]
+        hip_sites = [r for r in corrected if r.get("site") in hip_tags]
+
+        if spine_sites:
+            w = np.array([max(1, int(r.get("nvox", 1))) for r in spine_sites], dtype=float)
+            comp_bmd = float(np.average([r["bmd"] for r in spine_sites], weights=w))
+            ya_mu = float(getattr(self, "proj_spine_young_mean", 1000.0))
+            ya_sd = max(1e-6, float(getattr(self, "proj_spine_young_sd", 120.0)))
+            z_mu = float(getattr(self, "proj_spine_age_mean", 850.0))
+            z_sd = max(1e-6, float(getattr(self, "proj_spine_age_sd", 100.0)))
+            composite["spine"] = {
+                "bmd": comp_bmd,
+                "t_score": (comp_bmd - ya_mu) / ya_sd,
+                "z_score": (comp_bmd - z_mu) / z_sd,
+            }
+
+        if hip_sites:
+            w = np.array([max(1, int(r.get("nvox", 1))) for r in hip_sites], dtype=float)
+            hip_mean_bmd = float(np.average([r["bmd"] for r in hip_sites], weights=w))
+            ya_mu = float(getattr(self, "proj_fn_young_mean", 860.0))
+            ya_sd = max(1e-6, float(getattr(self, "proj_fn_young_sd", 110.0)))
+            z_mu = float(getattr(self, "proj_fn_age_mean", 740.0))
+            z_sd = max(1e-6, float(getattr(self, "proj_fn_age_sd", 100.0)))
+            composite["hips_mean"] = {
+                "bmd": hip_mean_bmd,
+                "t_score": (hip_mean_bmd - ya_mu) / ya_sd,
+                "z_score": (hip_mean_bmd - z_mu) / z_sd,
+            }
+
+        dxa["sites"] = corrected
+        dxa["composite"] = composite
 
     def _correct_spine_abmd_ranking(self, per_site: list) -> list:
         """Correct spine DXA aBMD values that violate qCT vBMD rankings.
