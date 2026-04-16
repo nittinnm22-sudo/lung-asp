@@ -5903,20 +5903,22 @@ Results:
         """Correct spine DXA aBMD values that violate qCT vBMD rankings.
 
         L4 posterior elements can inflate its AP projection mean, producing
-        L4 aBMD > L1 aBMD even when L4 vBMD < L1 vBMD.  When at least
-        3 spine sites have both qCT and DXA results, this method:
+        L4 aBMD > L1-L3 aBMD even when L4 vBMD < L1-L3 vBMD.  When at
+        least 3 spine sites have both qCT and DXA results, this method:
 
-          1. Detects pairwise ranking inversions between qCT vBMD and
-             projection aBMD (Kendall concordance check).
-          2. Identifies the single outlier whose removal restores rank
-             consistency among the remaining sites.
+          1. Counts per-site pairwise ranking discordances between qCT
+             vBMD and projection aBMD.
+          2. The site involved in the most discordances is the primary
+             outlier.  This tolerates natural physiological discordances
+             among the remaining sites (e.g., L3 aBMD > L1 aBMD despite
+             lower vBMD, due to L3 being physically larger).
           3. Fits OLS regression (vBMD → projection aBMD) through the
-             consistent (non-outlier) sites.
+             non-outlier sites.
           4. Replaces the outlier's aBMD (and T/Z scores) with the
-             regression prediction.
+             regression prediction, only if the actual aBMD was inflated
+             (higher than predicted).
 
-        Non-spine sites, sites without qCT results, and cases with
-        multiple simultaneous inversions are left unchanged.
+        Non-spine sites and sites without qCT results are left unchanged.
         """
         _SPINE = {"L1", "L2", "L3", "L4"}
 
@@ -5936,70 +5938,64 @@ Results:
         if len(pts) < 3:
             return per_site  # not enough data for regression
 
-        # Count pairwise ranking discordances
+        # Count per-site pairwise ranking discordances
         n = len(pts)
-        discordant = 0
+        disc_per = [0] * n
         for a in range(n):
             for b in range(a + 1, n):
                 if (pts[a][2] - pts[b][2]) * (pts[a][3] - pts[b][3]) < 0:
-                    discordant += 1
+                    disc_per[a] += 1
+                    disc_per[b] += 1
 
-        if discordant == 0:
+        max_disc = max(disc_per)
+        if max_disc == 0:
             return per_site  # rankings already consistent
 
-        # Identify the single outlier whose removal restores consistency
-        outlier_k: Optional[int] = None
-        for leave_out in range(n):
-            rest = [pts[j] for j in range(n) if j != leave_out]
-            ok = True
-            for a in range(len(rest)):
-                for b in range(a + 1, len(rest)):
-                    if (rest[a][2] - rest[b][2]) * (rest[a][3] - rest[b][3]) < 0:
-                        ok = False
-                        break
-                if not ok:
-                    break
-            if ok:
-                outlier_k = leave_out
-                break
+        # Among sites tied for the most discordances, pick the one whose
+        # leave-one-out regression shows the largest positive inflation
+        # (actual aBMD exceeds predicted aBMD the most).
+        candidates = [k for k in range(n) if disc_per[k] == max_disc]
 
-        if outlier_k is None:
-            return per_site  # multiple simultaneous inversions — skip
+        best_k: Optional[int] = None
+        best_inflation = 0.0  # must be positive to qualify
+        best_predicted = 0.0
 
-        # OLS regression through the non-outlier points
-        good = [pts[j] for j in range(n) if j != outlier_k]
-        ng = len(good)
-        sx = sum(p[2] for p in good)
-        sy = sum(p[3] for p in good)
-        sxy = sum(p[2] * p[3] for p in good)
-        sx2 = sum(p[2] ** 2 for p in good)
-        denom = ng * sx2 - sx * sx
-        if abs(denom) < 1e-12:
-            return per_site  # degenerate
+        for k in candidates:
+            good = [pts[j] for j in range(n) if j != k]
+            ng = len(good)
+            sx = sum(p[2] for p in good)
+            sy = sum(p[3] for p in good)
+            sxy = sum(p[2] * p[3] for p in good)
+            sx2 = sum(p[2] ** 2 for p in good)
+            denom = ng * sx2 - sx * sx
+            if abs(denom) < 1e-12:
+                continue  # degenerate — skip this candidate
+            slope = (ng * sxy - sx * sy) / denom
+            intercept = (sy - slope * sx) / ng
+            predicted = max(0.0, slope * pts[k][2] + intercept)
+            inflation = pts[k][3] - predicted
 
-        slope = (ng * sxy - sx * sy) / denom
-        intercept = (sy - slope * sx) / ng
+            if inflation > best_inflation:
+                best_inflation = inflation
+                best_k = k
+                best_predicted = predicted
 
-        idx, o_tag, o_vbmd, o_abmd = pts[outlier_k]
-        predicted = max(0.0, slope * o_vbmd + intercept)
-
-        # Only correct if projection was HIGHER than predicted
-        # (posterior-element inflation, not deflation).
-        if o_abmd <= predicted:
-            return per_site
+        if best_k is None:
+            return per_site  # no inflated outlier found
 
         # Replace outlier's aBMD and recompute T/Z scores
         corrected = list(per_site)
+        idx = pts[best_k][0]
         new_r = dict(corrected[idx])
-        new_r["bmd"] = predicted
-        new_r["bmd_uncorrected"] = o_abmd
+        new_r["bmd"] = best_predicted
+        new_r["bmd_uncorrected"] = pts[best_k][3]
 
         ya_mu = float(getattr(self, "proj_spine_young_mean", 1000.0))
         ya_sd = max(1e-6, float(getattr(self, "proj_spine_young_sd", 120.0)))
         z_mu = float(getattr(self, "proj_spine_age_mean", 850.0))
         z_sd = max(1e-6, float(getattr(self, "proj_spine_age_sd", 100.0)))
-        new_r["t_score"] = (predicted - ya_mu) / ya_sd
-        new_r["z_score"] = (predicted - z_mu) / z_sd
+        new_r["t_score"] = (best_predicted - ya_mu) / ya_sd
+        new_r["z_score"] = (best_predicted - z_mu) / z_sd
 
         corrected[idx] = new_r
         return corrected
